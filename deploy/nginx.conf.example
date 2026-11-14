@@ -1,0 +1,94 @@
+# Фронтовый обратный прокси для продакшена (nginx на хосте, перед Docker).
+#
+#   study-room.quietroom.name  → контейнер web (внутренний nginx): фронтенд + /api + /app (Reverb)
+#   livekit.quietroom.name     → контейнер livekit: WebSocket-сигналинг LiveKit
+#
+# Медиа LiveKit (WebRTC) идёт мимо прокси напрямую, поэтому в firewall
+# должны быть открыты порты 7881/tcp и 7882/udp (их публикует docker-compose).
+#
+# Сертификаты: certbot/Let's Encrypt или свой.
+
+upstream studyroom_web {
+    server 127.0.0.1:8080;
+}
+
+upstream studyroom_livekit {
+    server 127.0.0.1:7880;
+}
+
+# --- Редирект на HTTPS ---
+server {
+    listen 80;
+    server_name study-room.quietroom.name livekit.quietroom.name;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# --- Основной домен: приложение, API и WebSocket чата ---
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name study-room.quietroom.name;
+
+    ssl_certificate     /etc/letsencrypt/live/study-room.quietroom.name/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/study-room.quietroom.name/privkey.pem;
+
+    client_max_body_size 32m;
+
+    # WebSocket чата (Reverb, протокол Pusher)
+    location /app {
+        proxy_pass http://studyroom_web;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # Фронтенд, статика и /api/*
+    location / {
+        proxy_pass http://studyroom_web;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_read_timeout 120s;
+    }
+}
+
+# --- LiveKit: сигналинг (WebRTC-медиа идёт напрямую по UDP/TCP) ---
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name livekit.quietroom.name;
+
+    ssl_certificate     /etc/letsencrypt/live/livekit.quietroom.name/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/livekit.quietroom.name/privkey.pem;
+
+    location / {
+        proxy_pass http://studyroom_livekit;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}

@@ -25,6 +25,12 @@ return Application::configure(basePath: dirname(__DIR__))
         // иначе пытается редиректить неавторизованного пользователя на route('login').
         $middleware->prepend(\App\Http\Middleware\ForceJsonResponse::class);
 
+        // За приложением стоит обратный прокси (nginx/Caddy/Traefik) с TLS:
+        // без доверия прокси Laravel видит IP прокси, а не клиента.
+        $middleware->trustProxies(at: '*');
+
+        $middleware->throttleApi();
+
         $middleware->alias([
             'force.json' => \App\Http\Middleware\ForceJsonResponse::class,
         ]);

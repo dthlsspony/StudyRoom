@@ -224,6 +224,81 @@ docker compose down -v               # полный сброс вместе с �
   что комната в LiveKit действительно есть; если она закрылась (таймаут пустой
   комнаты или пропущенный вебхук), эфир помечается завершённым, а не «зависшим».
 
+## Развёртывание на домене
+
+Пример: приложение на `study-room.quietroom.name`, LiveKit — на отдельном
+поддомене `livekit.quietroom.name`.
+
+Отдельный поддомен для LiveKit обязателен: клиент подключается к
+`<host>/rtc/v1` от корня домена, поэтому разделить его с API по путям нельзя.
+
+### Что поменять в `.env`
+
+| Переменная | Значение | Почему |
+|---|---|---|
+| `APP_ENV` | `production` | режим приложения |
+| `APP_DEBUG` | `false` | не показывать детали ошибок наружу |
+| `APP_URL` | `https://study-room.quietroom.name` | генерация URL, ссылки в письмах |
+| `APP_KEY` | оставить текущий или сгенерировать новый | при смене все токены сгорят |
+| `LIVEKIT_URL` | `wss://livekit.quietroom.name` | адрес LiveKit для **браузера** |
+| `LIVEKIT_API_URL` | `http://livekit:7880` | адрес LiveKit для **backend** (внутренняя сеть) |
+| `LIVEKIT_NODE_IP` | пусто | на сервере с публичным IP LiveKit определит его сам (STUN) |
+| `VITE_REVERB_HOST` | `study-room.quietroom.name` | адрес Reverb для **браузера** |
+| `VITE_REVERB_PORT` | `443` | |
+| `VITE_REVERB_SCHEME` | `https` | |
+| `VITE_REVERB_KEY` | значение `REVERB_APP_KEY` | ключ Reverb |
+| `VITE_API_URL` | `` (пусто) | API на том же домене — относительные запросы |
+
+Что **не** меняется:
+
+- `REVERB_HOST` / `REVERB_PORT` / `REVERB_SCHEME` — это как **backend** ходит
+  в Reverb: он живёт в контейнере `app` рядом с ним, поэтому остаётся
+  `localhost` / `8081` / `http`. Браузер ходит в Reverb через домен — за это
+  отвечают `VITE_REVERB_*`.
+- `LIVEKIT_API_URL`, `DB_*` — внутренняя сеть Docker, домен там не нужен.
+- `CORS_ALLOWED_ORIGINS` в текущем виде ни на что не влияет: переменную не читает
+  ни одна конфигурация (`config/cors.php` не создан, а дефолтный из фреймворка
+  содержит `allowed_origins => ['*']`). Если фронт и API на одном домене, CORS и не
+  нужен; если разнести — опубликуйте `config/cors.php` через
+  `php artisan vendor:publish --tag=cors` и задайте origins там.
+
+### Обратный прокси
+
+Готовый конфиг — `deploy/nginx.conf.example`. Он терминирует TLS и передаёт:
+
+- `study-room.quietroom.name` → контейнер `web` (порт 8080): фронтенд, `/api/*`
+  и WebSocket чата `/app/{REVERB_APP_KEY}`;
+- `livekit.quietroom.name` → контейнер `livekit` (порт 7880): сигналинг LiveKit.
+
+Медиа WebRTC идёт мимо прокси напрямую, поэтому в firewall должны быть открыты
+**7881/tcp** и **7882/udp** (их публикует `docker-compose.yml`).
+
+Приложение за прокси доверие к `X-Forwarded-For` включено в
+`bootstrap/app.php` (`trustProxies`), иначе Laravel видел бы IP прокси, а не
+клиента. Ограничение частоты запросов — 120 в минуту на пользователя
+(для анонимных — на IP).
+
+### Порядок запуска на сервере
+
+```bash
+cp .env.example .env
+# заполнить .env по таблице выше, сгенерировать APP_KEY:
+docker compose run --rm app php artisan key:generate --force
+# пересобрать фронтенд: VITE_* попадают в бандл на этапе сборки
+docker compose exec frontend npm run build
+docker compose up -d --build
+```
+
+После смены `VITE_REVERB_*` фронтенд нужно пересобрать заново — эти значения
+впечатываются в бандл, а не читаются в рантайме.
+
+### LiveKit за доменом
+
+`LIVEKIT_NODE_IP` на сервере с публичным IP оставляйте пустым: LiveKit сам
+определит внешний адрес через STUN и объявит его в ICE-кандидатах. Значение
+нужно только если сервер стоит за NAT и наружу пробрасывается один порт — тогда
+указывайте IP, доступный браузеру, и публикуйте тот же порт в Docker.
+
 ### Видеосвязь и Docker
 
 WebRTC требует, чтобы браузер и сервер LiveKit «достучались» друг до друга по
