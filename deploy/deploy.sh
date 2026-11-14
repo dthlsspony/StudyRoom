@@ -212,10 +212,28 @@ published_ports() {
     '
 }
 
+# Занят ли порт нашим собственным контейнером.
+port_ours() {
+    local port="$1"
+    compose ps --format '{{.Ports}}' 2>/dev/null | grep -F -q ":${port}->"
+}
+
+# Подобрать свободный порт, начиная с заданного. Пропускаем и занятые
+# чужими процессами, и те, что уже публикуют наши контейнеры.
+pick_free_port() {
+    local start="${1:-5400}" port
+    for port in $(seq "$start" $((start + 300))); do
+        port_busy "$port" tcp && continue
+        port_ours "$port" && continue
+        printf '%s' "$port"
+        return 0
+    done
+    return 1
+}
+
 # Занят ли порт на хосте. Порты, которые уже публикуют наши собственные
 # контейнеры, заняты законно — их игнорируем.
 port_busy() {
-    local port="$1" proto="${2:-tcp}"
 
     [ -n "$port" ] || return 1
 
@@ -234,7 +252,15 @@ port_busy() {
     else
         local flag="-ltn"
         [ "$proto" = "udp" ] && flag="-lun"
-        netstat $flag 2>/dev/null | awk -v p=":$port" '$4 ~ p"$" {found=1} END {exit !found}' && return 0
+        if netstat $flag >/dev/null 2>&1; then
+            # Linux: локальный адрес в 4-й колонке
+            netstat $flag 2>/dev/null | awk -v p=":$port" '$4 ~ p"$" {found=1} END {exit !found}' && return 0
+        else
+            # Windows: netstat -ano, локальный адрес во 2-й колонке
+            local wflag="-ano"
+            [ "$proto" = "udp" ] && wflag="-ano -p UDP"
+            netstat $wflag 2>/dev/null | awk -v p=":$port" '$2 ~ p"$" {found=1} END {exit !found}' && return 0
+        fi
     fi
 
     return 1
@@ -314,31 +340,52 @@ preflight() {
 check_ports() {
     step "Проверка портов"
 
-    # подсказка по каждому порту: какая переменная его задаёт
-    hint_for_port() {
+    # Для каждого опубликованного порта: какая переменная его задаёт, какое
+    # значение считается «не заданным» (тогда подберём свободный сами) и подсказка.
+    spec_for_port() {
         case "$1" in
-            "$(env_get DB_PUBLISHED_PORT 5432)") echo "DB_PUBLISHED_PORT|порт БД на хосте — если свой Postgres уже слушает 5432, поставьте свободный (например 5433)" ;;
-            "$(env_get REVERB_PUBLISHED_PORT 8081)") echo "REVERB_PUBLISHED_PORT|порт Reverb на хосте — в бою можно его не публиковать вовсе (см. COMPOSE_EXTRA_FILE)" ;;
-            "$(app_port)") echo "APP_PORT|порт приложения — на него смотрит обратный прокси" ;;
-            "$(lk_port)") echo "LIVEKIT_HTTP_PORT|порт сигналинга LiveKit" ;;
-            "$(env_get LIVEKIT_TCP_PORT 7881)") echo "LIVEKIT_TCP_PORT|порт ICE поверх TCP у LiveKit" ;;
-            "$(env_get LIVEKIT_UDP_PORT 7882)") echo "LIVEKIT_UDP_PORT|порт медиа LiveKit (UDP) — LiveKit объявляет его в ICE-кандидатах, его публиковать обязательно" ;;
-            "$(env_get VITE_PORT 5173)") echo "VITE_PORT|порт dev-сервера фронтенда" ;;
-            *) echo "|порт не публикуется наружу" ;;
+            "$(env_get DB_PUBLISHED_PORT 5432)")
+                echo "DB_PUBLISHED_PORT|5432|порт БД на хосте — на него никто внешний не смотрит, можно поставить свободный" ;;
+            "$(env_get REVERB_PUBLISHED_PORT 8081)")
+                echo "REVERB_PUBLISHED_PORT|8081|порт Reverb на хосте — в бою его можно не публиковать вовсе (COMPOSE_EXTRA_FILE)" ;;
+            "$(app_port)")
+                echo "APP_PORT|8080|порт приложения — на него смотрит обратный прокси, менять нужно в Caddy тоже" ;;
+            "$(lk_port)")
+                echo "LIVEKIT_HTTP_PORT|7880|порт сигналинга LiveKit — на него смотрит обратный прокси" ;;
+            "$(env_get LIVEKIT_TCP_PORT 7881)")
+                echo "LIVEKIT_TCP_PORT|7881|порт ICE поверх TCP у LiveKit" ;;
+            "$(env_get LIVEKIT_UDP_PORT 7882)")
+                echo "LIVEKIT_UDP_PORT|7882|порт медиа LiveKit (UDP) — LiveKit объявляет его в ICE-кандидатах, публиковать обязательно" ;;
+            "$(env_get VITE_PORT 5173)")
+                echo "VITE_PORT|5173|порт dev-сервера фронтенда" ;;
+            *) echo "||порт не публикуется наружу" ;;
         esac
     }
 
-    local busy=0 entry port proto var hint
+    local busy=0 entry port proto var default hint current new_port
     while IFS= read -r entry; do
         [ -n "$entry" ] || continue
         port="${entry%%/*}"
         proto="${entry##*/}"
-        IFS='|' read -r var hint <<< "$(hint_for_port "$port")"
-        if port_busy "$port" "$proto"; then
-            fail "порт $port ($proto) уже занят на хосте — переменная $var"
-            [ -n "$hint" ] && warn "$hint"
-            busy=1
+        IFS='|' read -r var default hint <<< "$(spec_for_port "$port")"
+
+        port_busy "$port" "$proto" || continue
+
+        current="$(env_get "$var" "$default")"
+
+        # Значение не задано или осталось дефолтным — подберём свободный порт.
+        if [ -n "$default" ] && [ "$current" = "$default" ]; then
+            new_port="$(pick_free_port "$default")" || new_port=""
+            if [ -n "$new_port" ]; then
+                env_set "$var" "$new_port"
+                warn "порт $port занят — для $var подобрал свободный $new_port"
+                continue
+            fi
         fi
+
+        fail "порт $port ($proto) уже занят на хосте — $var=$current"
+        [ -n "$hint" ] && warn "$hint"
+        busy=1
     done <<< "$(published_ports)"
 
     if [ "$busy" -eq 1 ]; then
@@ -451,6 +498,47 @@ ensure_secrets() {
             ok "backend/.env синхронизирован: $key"
         fi
     done
+}
+
+# ===========================================================================
+# 2b. Внутренние адреса и порты
+# ===========================================================================
+fix_internal_settings() {
+    step "Внутренние адреса"
+
+    # Эти порты заданы конструктивно и не настраиваются: Postgres в сети
+    # Docker всегда слушает 5432, Reverb внутри контейнера app — 8081,
+    # LiveKit-контейнер — 7880. Если в .env стоит другое значение, связь
+    # приложения с сервисами просто не заработает.
+    local key value fixed=0
+    for key in DB_PORT REVERB_PORT; do
+        case "$key" in
+            DB_PORT)     value=5432 ;;
+            REVERB_PORT) value=8081 ;;
+        esac
+        if [ "$(env_get "$key")" != "$value" ]; then
+            local was
+            was="$(env_get "$key")"
+            env_set "$key" "$value"
+            ok "$key: $was → $value (внутренний порт)"
+            fixed=1
+        fi
+    done
+
+    # Внутренний адрес LiveKit — контейнер livekit в сети Docker.
+    local livekit_internal
+    livekit_internal="$(env_get LIVEKIT_API_URL)"
+    case "$livekit_internal" in
+        http://livekit:*)
+            if [ "$livekit_internal" != "http://livekit:7880" ]; then
+                env_set LIVEKIT_API_URL "http://livekit:7880"
+                ok "LIVEKIT_API_URL: $livekit_internal → http://livekit:7880 (внутренний адрес)"
+                fixed=1
+            fi
+            ;;
+    esac
+
+    [ "$fixed" -eq 1 ] && ok "внутренние настройки приведены к правильным" || ok "внутренние настройки корректны"
 }
 
 # ===========================================================================
@@ -696,6 +784,7 @@ main() {
     preflight
     check_ports
     ensure_secrets
+    fix_internal_settings
     backup
     update
     deploy
