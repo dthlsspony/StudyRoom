@@ -102,12 +102,19 @@ services:
       LIVEKIT_WEBHOOK_URL: ${LIVEKIT_WEBHOOK_URL:-http://web/api/v1/livekit/webhook}
       LIVEKIT_NODE_IP: ${LIVEKIT_NODE_IP:-}
       LIVEKIT_UDP_PORT: ${LIVEKIT_UDP_PORT:-7882}
+      LIVEKIT_TCP_PORT: ${LIVEKIT_TCP_PORT:-7881}
     volumes:
       - ./docker/livekit/entrypoint.sh:/livekit-entrypoint.sh:ro
     ports:
-      - "7880:7880"
-      - "7881:7881"
-      - "7882:7882/udp"
+      # Порт сигналинга (WebSocket) — на него смотрит обратный прокси.
+      - "${LIVEKIT_HTTP_PORT:-7880}:7880"
+      # ICE поверх TCP — запасной транспорт для медиа. Номер порта должен
+      # совпадать с тем, что LiveKit объявляет в кандидатах, поэтому
+      # пробрасываем его без изменения.
+      - "${LIVEKIT_TCP_PORT:-7881}:${LIVEKIT_TCP_PORT:-7881}"
+      # Медиа по UDP: этот порт LiveKit объявляет в ICE-кандидатах,
+      # поэтому он должен совпадать с открытым в firewall.
+      - "${LIVEKIT_UDP_PORT:-7882}:${LIVEKIT_UDP_PORT:-7882}/udp"
 
 volumes:
   db_data:

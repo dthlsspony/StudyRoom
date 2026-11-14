@@ -2,7 +2,13 @@
 # Smoke-тест API StudyRoom: авторизация, комнаты, чат, стрим.
 set -uo pipefail
 
-API="${API:-http://localhost:8080/api/v1}"
+# Порты берём из .env, чтобы тест не зависел от домена и настроек хоста.
+APP_PORT="${APP_PORT:-$(grep -E '^APP_PORT=' .env 2>/dev/null | head -1 | cut -d= -f2)}"
+APP_PORT="${APP_PORT:-8080}"
+LIVEKIT_HTTP_PORT="${LIVEKIT_HTTP_PORT:-$(grep -E '^LIVEKIT_HTTP_PORT=' .env 2>/dev/null | head -1 | cut -d= -f2)}"
+LIVEKIT_HTTP_PORT="${LIVEKIT_HTTP_PORT:-7880}"
+API="${API:-http://localhost:${APP_PORT}/api/v1}"
+BASE_URL="${BASE_URL:-http://localhost:${APP_PORT}}"
 PASS=0
 FAIL=0
 SUFFIX="$$-$(date +%s)"
@@ -93,7 +99,7 @@ START=$(curl -s -X POST "$API/rooms/$ROOM_ID/stream" -H "$AUTH")
 check "эфир запущен" "$(echo "$START" | jqn "j.is_live")" "true"
 LK_TOKEN=$(echo "$START" | jqn "j.token")
 check "LiveKit-токен выдан" "${LK_TOKEN:0:3}" "eyJ"
-check "адрес LiveKit" "$(echo "$START" | jqn "j.ws_url")" "ws://localhost:7880"
+check "адрес LiveKit" "$(echo "$START" | jqn "j.ws_url")" "ws://localhost:${LIVEKIT_HTTP_PORT:-7880}"
 check "имя комнаты LiveKit" "$(echo "$START" | jqn "j.room_name")" "studyroom-$ROOM_ID"
 
 ACCESS2=$(curl -s "$API/rooms/$ROOM_ID/stream" -H "$AUTH")
@@ -105,7 +111,7 @@ check "комната помечена как живая" "$(echo "$ROOM_STATE" 
 echo "== 6. Комнаты LiveKit =="
 LK_TOKEN_SVC=$(docker compose exec -T app php artisan tinker --execute \
   "echo \App\Services\LiveKit\LiveKitService::fromConfig()->createServiceToken();" 2>/dev/null | tail -1)
-LKROOMS=$(curl -s "http://localhost:7880/twirp/livekit.RoomService/ListRooms" \
+LKROOMS=$(curl -s "http://localhost:${LIVEKIT_HTTP_PORT:-7880}/twirp/livekit.RoomService/ListRooms" \
   -H "Content-Type: application/json" -H "Authorization: Bearer $LK_TOKEN_SVC" -d '{}')
 check "комната создана в LiveKit" \
   "$(echo "$LKROOMS" | jqn "j.rooms.find(r=>r.name==='studyroom-$ROOM_ID')?'yes':'no'")" "yes"
@@ -116,14 +122,14 @@ OWNER_ID=$(echo "$ME" | jqn "j.data.id")
 LEFT_BODY="{\"event\":\"participant_left\",\"room\":{\"name\":\"studyroom-${ROOM_ID}\"},\"participant\":{\"identity\":\"${OWNER_ID}\"},\"createdAt\":$(date +%s)}"
 LEFT_TOKEN=$(docker compose exec -T app php artisan tinker --execute \
   "\$body = '${LEFT_BODY}'; \$claims = ['iss' => config('livekit.api_key'), 'nbf' => time()-5, 'exp' => time()+300, 'sha256' => base64_encode(hash('sha256', \$body, true))]; echo \Firebase\JWT\JWT::encode(\$claims, config('livekit.api_secret'), 'HS256');" 2>/dev/null | tail -1)
-LEFT_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:8080/api/v1/livekit/webhook" \
+LEFT_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${BASE_URL}/api/v1/livekit/webhook" \
   -H "Content-Type: application/json" -H "Authorization: Bearer $LEFT_TOKEN" -d "$LEFT_BODY")
 check "вебхук participant_left принят" "$LEFT_CODE" "200"
 
 ROOM_AFTER_LEFT=$(curl -s "$API/rooms/$ROOM_ID" -H "$AUTH")
 check "эфир завершён после ухода ведущего" "$(echo "$ROOM_AFTER_LEFT" | jqn "j.data.is_live")" "false"
 
-LKROOMS2=$(curl -s "http://localhost:7880/twirp/livekit.RoomService/ListRooms" \
+LKROOMS2=$(curl -s "http://localhost:${LIVEKIT_HTTP_PORT:-7880}/twirp/livekit.RoomService/ListRooms" \
   -H "Content-Type: application/json" -H "Authorization: Bearer $LK_TOKEN_SVC" -d '{}')
 check "комната LiveKit удалена" \
   "$(echo "$LKROOMS2" | jqn "j.rooms.find(r=>r.name==='studyroom-$ROOM_ID')?'yes':'no'")" "no"
@@ -149,12 +155,12 @@ DEL_OTHER=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API/rooms/$ROOM_I
 check "чужой не может удалить комнату" "$DEL_OTHER" "403"
 
 echo "== 9. Broadcasting (Reverb) =="
-BAUTH=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:8080/api/broadcasting/auth" \
+BAUTH=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${BASE_URL}/api/broadcasting/auth" \
   -H "$AUTH" -H "Content-Type: application/x-www-form-urlencoded" \
   -d "channel_name=rooms.${ROOM_ID}&socket_id=123.456")
 check "авторизация приватного канала" "$BAUTH" "200"
 
-BAUTH_NO=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:8080/api/broadcasting/auth" \
+BAUTH_NO=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${BASE_URL}/api/broadcasting/auth" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "channel_name=rooms.${ROOM_ID}&socket_id=123.456")
 check "без токена канал не авторизуется" "$BAUTH_NO" "401"
@@ -164,11 +170,11 @@ HOOK_BODY="{\"event\":\"room_started\",\"room\":{\"name\":\"studyroom-${ROOM_ID}
 HOOK_TOKEN=$(docker compose exec -T app php artisan tinker --execute \
   "\$body = '${HOOK_BODY}'; \$claims = ['iss' => config('livekit.api_key'), 'nbf' => time()-5, 'exp' => time()+300, 'sha256' => base64_encode(hash('sha256', \$body, true))]; echo \Firebase\JWT\JWT::encode(\$claims, config('livekit.api_secret'), 'HS256');" 2>/dev/null | tail -1)
 
-HOOK_OK=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:8080/api/v1/livekit/webhook" \
+HOOK_OK=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${BASE_URL}/api/v1/livekit/webhook" \
   -H "Content-Type: application/json" -H "Authorization: Bearer $HOOK_TOKEN" -d "$HOOK_BODY")
 check "подписанный вебхук принят" "$HOOK_OK" "200"
 
-HOOK_BAD=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:8080/api/v1/livekit/webhook" \
+HOOK_BAD=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${BASE_URL}/api/v1/livekit/webhook" \
   -H "Content-Type: application/json" -H "Authorization: Bearer bad.token.value" -d "$HOOK_BODY")
 check "неподписанный вебхук отклонён" "$HOOK_BAD" "401"
 

@@ -243,6 +243,10 @@ docker compose down -v               # полный сброс вместе с �
 | `LIVEKIT_URL` | `wss://livekit.quietroom.name` | адрес LiveKit для **браузера** |
 | `LIVEKIT_API_URL` | `http://livekit:7880` | адрес LiveKit для **backend** (внутренняя сеть) |
 | `LIVEKIT_NODE_IP` | пусто | на сервере с публичным IP LiveKit определит его сам (STUN) |
+| `APP_PORT` | `8082` | хостовый порт контейнера `web` — на него смотрит Caddy |
+| `LIVEKIT_HTTP_PORT` | `7882` | хостовый порт сигналинга LiveKit — на него смотрит Caddy |
+| `LIVEKIT_UDP_PORT` | `7882` | хостовый порт медиа (UDP) — его LiveKit объявляет в кандидатах |
+| `LIVEKIT_TCP_PORT` | `7881` | ICE поверх TCP, запасной транспорт |
 | `VITE_REVERB_HOST` | `study-room.quietroom.name` | адрес Reverb для **браузера** |
 | `VITE_REVERB_PORT` | `443` | |
 | `VITE_REVERB_SCHEME` | `https` | |
@@ -276,16 +280,18 @@ docker compose down -v               # полный сброс вместе с �
 
 ```caddyfile
 study-room.quietroom.name {
-    reverse_proxy 127.0.0.1:8080
+    reverse_proxy 127.0.0.1:8082
 }
 
 livekit.quietroom.name {
-    reverse_proxy 127.0.0.1:7880
+    reverse_proxy 127.0.0.1:7882
 }
 ```
 
-Медиа WebRTC идёт мимо прокси напрямую, поэтому в firewall должны быть открыты
-**7881/tcp** и **7882/udp** (их публикует `docker-compose.yml`).
+Медиа WebRTC идёт мимо прокси напрямую, поэтому в firewall должен быть открыт
+**7882/udp** (`LIVEKIT_UDP_PORT`) — именно этот порт LiveKit объявляет в
+ICE-кандидатах, и он же публикуется Docker'ом. Порт 7881/tcp (ICE поверх TCP)
+нужен как запасной транспорт.
 
 Приложение за прокси доверие к `X-Forwarded-For` включено в
 `bootstrap/app.php` (`trustProxies`), иначе Laravel видел бы IP прокси, а не
