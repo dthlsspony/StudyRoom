@@ -1,0 +1,15 @@
+[Unit]
+Description=Ежедневное обновление StudyRoom (docker pull + build + проверка + откат)
+Requires=studyroom-deploy.service
+
+[Timer]
+# Каждую ночь в 4:12 — не на ровный час, чтобы не совпадать с другими задачами.
+OnCalendar=*-*-* 04:12:00
+# Если машина была выключена — доделать при следующем включении.
+Persistent=true
+# Случайная задержка до 15 минут, чтобы не нагружать реестр одновременно с другими.
+RandomizedDelaySec=900
+Unit=studyroom-deploy.service
+
+[Install]
+WantedBy=timers.target

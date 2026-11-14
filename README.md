@@ -50,6 +50,72 @@ bash docker/smoke-test.sh      # 29 проверок API: auth, комнаты, 
 | `db` | PostgreSQL 17 |
 | `livekit` | LiveKit Server; вебхуки уходят на `http://web/api/v1/livekit/webhook` |
 
+## Деплой
+
+Скрипт `deploy/deploy.sh` закрывает весь цикл: генерация недостающих секретов →
+бэкап → обновление образов → деплой → проверка → **автоматический откат** при ошибке.
+
+```bash
+bash deploy/deploy.sh                # деплой с проверками
+bash deploy/deploy.sh --skip-pull    # не обновлять базовые образы (postgres, livekit)
+bash deploy/deploy.sh --skip-git     # не делать git pull
+bash deploy/deploy.sh --full         # плюс полный смоук-тест API
+bash deploy/deploy.sh --dry-run      # показать план, ничего не меняя
+bash deploy/deploy.sh --simulate-failure   # проверить, что откат работает
+```
+
+Что происходит по шагам:
+
+1. **Префлайт** — наличие docker и docker compose, `.env`, проверка обязательных переменных.
+2. **Секреты** — генерируются только недостающие: пароль БД, ключ и секрет LiveKit,
+   ключ и секрет Reverb, `APP_KEY`. Уже заданные значения не трогаются, поэтому
+   скрипт идемпотентен. Пароль БД не меняется, если том с данными уже создан:
+   Postgres задаёт его при инициализации, иначе контейнер перестал бы подключаться.
+   Ключ Reverb дублируется в `VITE_REVERB_KEY` — фронтенд пересобирается под него.
+3. **Бэкап** — дамп БД (`pg_dump -Fc`) в `deploy/backups/<метка>/` и сохранение
+   текущих образов по ID, чтобы вернуть именно прежнюю сборку.
+4. **Обновление** — `git pull --ff-only` (если рабочее дерево чистое),
+   `docker compose pull` для postgres и livekit, сборка образов приложения.
+   Если реестр недоступен, сборка повторяется на локальном кэше образов.
+5. **Деплой** — `docker compose up -d`, ожидание готовности БД и ответа `/up`.
+6. **Проверка** — все контейнеры запущены, БД отвечает и видит таблицы,
+   `/up` отвечает, API возвращает 401 без токена, LiveKit отвечает,
+   WebSocket чата даёт `101 Switching Protocols`. Опционально — полный смоук-тест.
+   Кратковременные 502/503 после перезапуска пережидаются повторами.
+7. **Откат** — при любой ошибке: `.env` возвращается к состоянию до деплоя,
+   образы возвращаются к прежним по ID, контейнеры пересоздаются на них,
+   база восстанавливается из дампа. В вывод попадает причина сбоя и путь к логу.
+
+Дампы хранятся в `deploy/backups/` (последние 5), логи — в `deploy/logs/`.
+
+### Автоматические обновления
+
+Юниты для systemd в `deploy/`:
+
+```bash
+sudo cp deploy/studyroom-deploy.service /etc/systemd/system/
+sudo cp deploy/studyroom-deploy.timer  /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now studyroom-deploy.timer
+```
+
+Таймер запускает деплой каждую ночь в 4:12; если машина была выключена —
+догонит при следующем включении (`Persistent=true`). Аналог для cron:
+
+```cron
+17 4 * * * cd /opt/studyroom && /usr/bin/bash deploy/deploy.sh --skip-git >> deploy/logs/cron.log 2>&1
+```
+
+Уведомление о результате можно прикрутить к journal:
+
+```bash
+# уведомление об успехе
+SuccessExitStatus=0
+OnSuccess=mail -s "StudyRoom: деплой успешен" admin@example.com
+# об ошибке — сам скрипт печатает причину в stdout
+OnFailure=mail -s "StudyRoom: деплой провален, выполнен откат" admin@example.com
+```
+
 ### Частые команды
 
 ```bash

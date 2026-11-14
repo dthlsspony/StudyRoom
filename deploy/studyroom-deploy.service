@@ -1,0 +1,21 @@
+[Unit]
+Description=StudyRoom deploy (pull, build, verify, rollback on failure)
+Documentation=https://github.com/dthlsspony/StudyRoom
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Запускать из корня проекта: скрипт сам ищет docker-compose.yml.
+WorkingDirectory=/opt/studyroom
+ExecStart=/usr/bin/bash /opt/studyroom/deploy/deploy.sh --skip-git
+# Деплой не должен мешать systemd: даём ему время на сборку и откат.
+TimeoutStartSec=1800
+# Уведомление об успехе/провале — поменяйте на свой канал.
+SuccessExitStatus=0
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
