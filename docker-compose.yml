@@ -34,7 +34,10 @@ services:
     volumes:
       - db_data:/var/lib/postgresql/data
     ports:
-      - "${DB_PORT:-5432}:5432"
+      # Порт БД на хосте. Отдельно от DB_PORT (того, что видит приложение
+      # внутри сети Docker): если 5432 на хосте уже занят своим Postgres,
+      # поставьте здесь свободный порт.
+      - "${DB_PUBLISHED_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-studyroom} -d ${DB_DATABASE:-studyroom}"]
       interval: 5s

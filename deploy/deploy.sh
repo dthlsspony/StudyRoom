@@ -178,6 +178,34 @@ db_name()  { env_get DB_DATABASE studyroom; }
 app_port() { env_get APP_PORT 8080; }
 lk_port()  { env_get LIVEKIT_HTTP_PORT 7880; }
 
+# Занят ли порт на хосте. Порты, которые уже публикуют наши собственные
+# контейнеры, заняты законно — их игнорируем.
+port_busy() {
+    local port="$1" proto="${2:-tcp}"
+
+    [ -n "$port" ] || return 1
+
+    if docker compose ps --format '{{.Ports}}' 2>/dev/null | grep -q ":${port}->"; then
+        return 1
+    fi
+
+    command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1 || return 1
+
+    if command -v ss >/dev/null 2>&1; then
+        if [ "$proto" = "udp" ]; then
+            ss -lun 2>/dev/null | awk -v p=":$port" '$5 ~ p"$" {found=1} END {exit !found}' && return 0
+        else
+            ss -ltn 2>/dev/null | awk -v p=":$port" '$4 ~ p"$" {found=1} END {exit !found}' && return 0
+        fi
+    else
+        local flag="-ltn"
+        [ "$proto" = "udp" ] && flag="-lun"
+        netstat $flag 2>/dev/null | awk -v p=":$port" '$4 ~ p"$" {found=1} END {exit !found}' && return 0
+    fi
+
+    return 1
+}
+
 # HTTP-код с повторами: сразу после перезапуска контейнеров соединение может
 # кратковременно отваливаться (502/503/504), пока поднимается php-fpm.
 # Это не повод откатывать деплой — ждём и пробуем ещё раз.
@@ -245,6 +273,42 @@ preflight() {
     fi
 
     ok "окружение готово"
+}
+
+# Проверяем порты, которые Docker собирается опубликовать на хосте: конфликт
+# иначе всплывает в середине деплоя, когда часть контейнеров уже поднята.
+check_ports() {
+    step "Проверка портов"
+
+    local busy=0
+    local db_published
+    db_published="$(env_get DB_PUBLISHED_PORT 5432)"
+
+    # проверяем: порт, протокол, имя переменной, подсказка
+    local -a checks=(
+        "$db_published|tcp|DB_PUBLISHED_PORT|порт БД на хосте — если свой Postgres уже слушает 5432, поставьте свободный порт (например 5433)"
+        "$(app_port)|tcp|APP_PORT|порт приложения (его слушает nginx из контейнера web)"
+        "$(lk_port)|tcp|LIVEKIT_HTTP_PORT|порт сигналинга LiveKit"
+        "$(env_get LIVEKIT_TCP_PORT 7881)|tcp|LIVEKIT_TCP_PORT|порт ICE поверх TCP у LiveKit"
+        "$(env_get REVERB_PORT 8081)|tcp|REVERB_PORT|порт Reverb"
+        "$(env_get VITE_PORT 5173)|tcp|VITE_PORT|порт dev-сервера фронтенда"
+    )
+
+    local entry port proto var hint
+    for entry in "${checks[@]}"; do
+        IFS='|' read -r port proto var hint <<< "$entry"
+        if port_busy "$port" "$proto"; then
+            fail "порт $port ($proto) уже занят на хосте — переменная $var"
+            warn "$hint"
+            busy=1
+        fi
+    done
+
+    if [ "$busy" -eq 1 ]; then
+        die "сначала освободите порты или смените их в .env — деплой остановлен до изменений"
+    fi
+
+    ok "все порты свободны"
 }
 
 # ===========================================================================
@@ -579,6 +643,7 @@ main() {
     if [ "$DRY_RUN" -eq 1 ]; then
         step "Пробный запуск (ничего не меняем)"
         preflight
+        check_ports
         step "Будет сделано"
         echo "  • сгенерированы недостающие секреты в .env"
         echo "  • дамп БД: deploy/backups/$TS/db.dump"
@@ -589,6 +654,7 @@ main() {
     fi
 
     preflight
+    check_ports
     ensure_secrets
     backup
     update
