@@ -290,7 +290,8 @@ check_ports() {
         "$(app_port)|tcp|APP_PORT|порт приложения (его слушает nginx из контейнера web)"
         "$(lk_port)|tcp|LIVEKIT_HTTP_PORT|порт сигналинга LiveKit"
         "$(env_get LIVEKIT_TCP_PORT 7881)|tcp|LIVEKIT_TCP_PORT|порт ICE поверх TCP у LiveKit"
-        "$(env_get REVERB_PORT 8081)|tcp|REVERB_PORT|порт Reverb"
+        "$(env_get LIVEKIT_UDP_PORT 7882)|udp|LIVEKIT_UDP_PORT|порт медиа LiveKit (UDP) — LiveKit объявляет его в ICE-кандидатах"
+        "$(env_get REVERB_PUBLISHED_PORT 8081)|tcp|REVERB_PUBLISHED_PORT|порт Reverb на хосте — если 8081 занят, поставьте свободный"
         "$(env_get VITE_PORT 5173)|tcp|VITE_PORT|порт dev-сервера фронтенда"
     )
 
