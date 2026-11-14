@@ -1,0 +1,115 @@
+name: studyroom
+
+x-app-env: &app-env
+  APP_NAME: ${APP_NAME:-StudyRoom}
+  APP_ENV: ${APP_ENV:-local}
+  APP_DEBUG: ${APP_DEBUG:-true}
+  APP_URL: ${APP_URL:-http://localhost:8080}
+  DB_CONNECTION: pgsql
+  DB_HOST: db
+  DB_PORT: 5432
+  DB_DATABASE: ${DB_DATABASE:-studyroom}
+  DB_USERNAME: ${DB_USERNAME:-studyroom}
+  DB_PASSWORD: ${DB_PASSWORD:-studyroom}
+  LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
+  LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-devsecret}
+  LIVEKIT_URL: ${LIVEKIT_URL:-ws://localhost:7880}
+  LIVEKIT_API_URL: ${LIVEKIT_API_URL:-http://livekit:7880}
+  LIVEKIT_WEBHOOK_URL: ${LIVEKIT_WEBHOOK_URL:-http://web/api/v1/livekit/webhook}
+  REVERB_APP_ID: ${REVERB_APP_ID:-studyroom}
+  REVERB_APP_KEY: ${REVERB_APP_KEY:-studyroomappkey}
+  REVERB_HOST: ${REVERB_HOST:-localhost}
+  REVERB_PORT: ${REVERB_PORT:-8081}
+  REVERB_SCHEME: ${REVERB_SCHEME:-http}
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:8080}
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_DATABASE:-studyroom}
+      POSTGRES_USER: ${DB_USERNAME:-studyroom}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-studyroom}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-studyroom} -d ${DB_DATABASE:-studyroom}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+    restart: unless-stopped
+    entrypoint: ["/bin/bash", "/usr/local/bin/entrypoint.sh"]
+    environment:
+      <<: *app-env
+    volumes:
+      - ./backend:/var/www/html
+      - backend_vendor:/var/www/html/vendor
+      - ./docker/php/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro
+    ports:
+      # Reverb (websocket-сервер для чата) — доступен браузеру напрямую.
+      - "${REVERB_PORT:-8081}:8081"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/nginx/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8080}:80"
+    volumes:
+      - ./frontend/dist:/var/www/html:ro
+    depends_on:
+      - app
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/node/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${VITE_PORT:-5173}:5173"
+    environment:
+      VITE_API_URL: ""
+      VITE_LIVEKIT_URL: ${LIVEKIT_URL:-ws://localhost:7880}
+      VITE_REVERB_KEY: ${REVERB_APP_KEY:-studyroomappkey}
+      VITE_REVERB_HOST: ${REVERB_HOST:-localhost}
+      VITE_REVERB_PORT: ${REVERB_PORT:-8081}
+      VITE_REVERB_SCHEME: ${REVERB_SCHEME:-http}
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    depends_on:
+      - app
+
+  livekit:
+    image: livekit/livekit-server:v1.13.11
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/livekit-entrypoint.sh"]
+    environment:
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-devsecret}
+      LIVEKIT_WEBHOOK_URL: ${LIVEKIT_WEBHOOK_URL:-http://web/api/v1/livekit/webhook}
+      LIVEKIT_NODE_IP: ${LIVEKIT_NODE_IP:-}
+      LIVEKIT_UDP_PORT: ${LIVEKIT_UDP_PORT:-7882}
+    volumes:
+      - ./docker/livekit/entrypoint.sh:/livekit-entrypoint.sh:ro
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+
+volumes:
+  db_data:
+  backend_vendor:
+  frontend_node_modules:

@@ -1,0 +1,28 @@
+# Окружение
+.env
+backend/.env
+backend/.env.backup
+
+# Зависимости
+backend/vendor/
+backend/node_modules/
+frontend/node_modules/
+
+# Сборка
+frontend/dist/
+backend/public/build/
+backend/public/hot
+backend/storage/*.key
+
+# Логи и кэш
+backend/storage/logs/
+backend/storage/framework/cache/
+backend/storage/framework/sessions/
+backend/storage/framework/views/
+backend/bootstrap/cache/*.php
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
