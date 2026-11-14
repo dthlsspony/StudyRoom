@@ -195,17 +195,22 @@ published_ports() {
     json="$(compose config --format json 2>/dev/null || true)"
     [ -n "$json" ] || return 0
 
-    printf '%s' "$json" | tr '{' '\n' | awk '
+    # JSON от compose печатается в несколько строк, поэтому сначала схлопываем
+    # его в одну, а затем режем по '{' — иначе published и protocol окажутся
+    # в разных строках и протокол будет определён неверно.
+    printf '%s' "$json" | tr -d '\n' | tr '{' '\n' | awk '
         {
             port = ""
             proto = "tcp"
             if (match($0, /"published": *"[0-9]+"/)) {
                 port = substr($0, RSTART, RLENGTH)
-                gsub(/[^0-9]/, "", port)
+                sub(/.*"published": *"/, "", port)
+                sub(/".*/, "", port)
             }
             if (match($0, /"protocol": *"[a-z]+"/)) {
                 proto = substr($0, RSTART, RLENGTH)
-                gsub(/[^a-z]/, "", proto)
+                sub(/.*"protocol": *"/, "", proto)
+                sub(/".*/, "", proto)
             }
             if (port != "") print port "/" proto
         }
@@ -218,13 +223,28 @@ port_ours() {
     compose ps --format '{{.Ports}}' 2>/dev/null | grep -F -q ":${port}->"
 }
 
+# Порты, которые уже заняты другими переменными .env: подбирать их нельзя,
+# иначе два сервиса получат один и тот же порт (контейнеры при этом могут
+# быть ещё не запущены, и проверка занятости ничего не увидит).
+reserved_ports() {
+    local var value
+    for var in APP_PORT VITE_PORT LIVEKIT_HTTP_PORT LIVEKIT_TCP_PORT LIVEKIT_UDP_PORT \
+               DB_PUBLISHED_PORT REVERB_PUBLISHED_PORT; do
+        value="$(env_get "$var")"
+        [ -n "$value" ] && printf '%s\n' "$value"
+    done
+}
+
 # Подобрать свободный порт, начиная с заданного. Пропускаем и занятые
-# чужими процессами, и те, что уже публикуют наши контейнеры.
+# чужими процессами, и те, что уже публикуют наши контейнеры, и порты,
+# зарезервированные другими переменными .env.
 pick_free_port() {
-    local start="${1:-5400}" port
+    local start="${1:-5400}" port reserved
+    reserved="$(reserved_ports)"
     for port in $(seq "$start" $((start + 300))); do
         port_busy "$port" tcp && continue
         port_ours "$port" && continue
+        printf '%s\n' "$reserved" | grep -Fxq "$port" && continue
         printf '%s' "$port"
         return 0
     done
@@ -387,6 +407,16 @@ check_ports() {
         [ -n "$hint" ] && warn "$hint"
         busy=1
     done <<< "$(published_ports)"
+
+    # Один порт нельзя публиковать дважды (в рамках одного протокола) —
+    # Docker скажет об этом только в момент запуска контейнеров, когда часть
+    # стека уже поднята. TCP и UDP на одном номере — не конфликт.
+    local dup
+    dup="$(published_ports | sort | uniq -d | tr '\n' ' ')"
+    if [ -n "$dup" ]; then
+        fail "порт(ы) $dup заданы в .env дважды — проверьте DB_PUBLISHED_PORT, REVERB_PUBLISHED_PORT и APP_PORT"
+        busy=1
+    fi
 
     if [ "$busy" -eq 1 ]; then
         die "сначала освободите порты или смените их в .env — деплой остановлен до изменений"
