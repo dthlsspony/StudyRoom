@@ -438,8 +438,11 @@ ensure_secrets() {
 
     # Дублируем ключи в backend/.env: приложение вне Docker (например artisan
     # локально) должно видеть те же значения, что и контейнер.
+    # Приводим backend/.env к актуальным значениям: приложение должно видеть
+    # те же настройки БД, LiveKit и Reverb, что и контейнеры.
     local key value
-    for key in REVERB_APP_ID REVERB_APP_KEY REVERB_APP_SECRET REVERB_HOST REVERB_PORT REVERB_SCHEME \
+    for key in DB_CONNECTION DB_HOST DB_PORT DB_DATABASE DB_USERNAME DB_PASSWORD \
+               REVERB_APP_ID REVERB_APP_KEY REVERB_APP_SECRET REVERB_HOST REVERB_PORT REVERB_SCHEME \
                LIVEKIT_API_KEY LIVEKIT_API_SECRET LIVEKIT_URL LIVEKIT_API_URL; do
         value="$(env_get "$key")"
         [ -n "$value" ] || continue
