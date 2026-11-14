@@ -59,6 +59,7 @@ LAST_ERROR=""
 DEPLOY_STARTED=0
 BACKUP_DUMP=""
 BACKUP_ENV=""
+BACKUP_ENV_LARAVEL=""
 PREV_IMAGES=()
 
 # ---------------------------------------------------------------------------
@@ -76,6 +77,9 @@ handle_failure() {
     # .env восстанавливаем всегда: секреты могли смениться до падения
     if [ -n "$BACKUP_ENV" ] && [ -f "$BACKUP_ENV" ]; then
         cp "$BACKUP_ENV" .env
+    fi
+    if [ -n "${BACKUP_ENV_LARAVEL:-}" ] && [ -f "$BACKUP_ENV_LARAVEL" ]; then
+        cp "$BACKUP_ENV_LARAVEL" backend/.env
     fi
 
     if [ "$DEPLOY_STARTED" -eq 1 ]; then
@@ -111,6 +115,23 @@ env_set() {
         sed -i "s|^${key}=.*|${key}=${value}|" .env
     else
         printf '%s=%s\n' "$key" "$value" >> .env
+    fi
+}
+
+# Laravel держит свои настройки в backend/.env — там же живёт APP_KEY.
+laravel_env_get() {
+    local key="$1" default="${2:-}"
+    local value
+    value="$(grep -E "^${key}=" backend/.env 2>/dev/null | head -1 | cut -d= -f2- || true)"
+    [ -n "$value" ] && printf '%s' "$value" || printf '%s' "$default"
+}
+
+laravel_env_set() {
+    local key="$1" value="$2"
+    if grep -qE "^${key}=" backend/.env 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=${value}|" backend/.env
+    else
+        printf '%s=%s\n' "$key" "$value" >> backend/.env
     fi
 }
 
@@ -178,6 +199,12 @@ preflight() {
     BACKUP_ENV="$BACKUP_DIR/.env"
     cp .env "$BACKUP_ENV"
     ok ".env сохранён для отката"
+
+    if [ -f backend/.env ]; then
+        BACKUP_ENV_LARAVEL="$BACKUP_DIR/.env.backend"
+        cp backend/.env "$BACKUP_ENV_LARAVEL"
+        ok "backend/.env сохранён для отката"
+    fi
 
     local missing=()
     for key in APP_PORT DB_DATABASE DB_USERNAME DB_PASSWORD LIVEKIT_API_KEY LIVEKIT_API_SECRET \
@@ -249,13 +276,14 @@ ensure_secrets() {
         env_set VITE_REVERB_SCHEME "$(env_get VITE_REVERB_SCHEME http)"
     fi
 
-    # APP_KEY должен соответствовать Laravel — генерируем его контейнером
-    if [ -z "$(env_get APP_KEY)" ]; then
+    # APP_KEY живёт в backend/.env: перегенерировать его на каждом деплое
+    # нельзя — это отозвало бы все выданные токены.
+    if [ -z "$(laravel_env_get APP_KEY)" ]; then
         if docker compose ps --status running --services 2>/dev/null | grep -qx app; then
             docker compose exec -T app php artisan key:generate --force --no-interaction >/dev/null
             ok "сгенерирован APP_KEY"
         else
-            env_set APP_KEY "base64:$(random_hex 48)"
+            laravel_env_set APP_KEY "base64:$(random_hex 48)"
             ok "сгенерирован APP_KEY (контейнер не запущен)"
         fi
         changed=1
@@ -266,6 +294,19 @@ ensure_secrets() {
     else
         ok "секреты на месте, менять нечего"
     fi
+
+    # Дублируем ключи в backend/.env: приложение вне Docker (например artisan
+    # локально) должно видеть те же значения, что и контейнер.
+    local key value
+    for key in REVERB_APP_ID REVERB_APP_KEY REVERB_APP_SECRET REVERB_HOST REVERB_PORT REVERB_SCHEME \
+               LIVEKIT_API_KEY LIVEKIT_API_SECRET LIVEKIT_URL LIVEKIT_API_URL; do
+        value="$(env_get "$key")"
+        [ -n "$value" ] || continue
+        if [ "$(laravel_env_get "$key")" != "$value" ]; then
+            laravel_env_set "$key" "$value"
+            ok "backend/.env синхронизирован: $key"
+        fi
+    done
 }
 
 # ===========================================================================
@@ -428,6 +469,10 @@ rollback() {
     if [ -n "$BACKUP_ENV" ] && [ -f "$BACKUP_ENV" ]; then
         cp "$BACKUP_ENV" .env
         ok ".env восстановлен"
+    fi
+    if [ -n "${BACKUP_ENV_LARAVEL:-}" ] && [ -f "$BACKUP_ENV_LARAVEL" ]; then
+        cp "$BACKUP_ENV_LARAVEL" backend/.env
+        ok "backend/.env восстановлен"
     fi
 
     # Возвращаем прежние образы по сохранённым ID
