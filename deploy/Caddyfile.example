@@ -1,0 +1,51 @@
+# Caddy на хосте перед Docker-стеком StudyRoom.
+#
+#   study-room.quietroom.name  → контейнер web (127.0.0.1:8080):
+#                                фронтенд + /api/* + WebSocket чата /app/{REVERB_APP_KEY}
+#   livekit.quietroom.name     → контейнер livekit (127.0.0.1:7880): сигналинг LiveKit
+#
+# Caddy сам выпускает и обновляет сертификаты Let's Encrypt (нужны DNS на этот
+# хост и открытые 80/443). WebSocket-апгрейд reverse_proxy обрабатывает сам.
+#
+# Медиа WebRTC идёт мимо прокси напрямую: в firewall должны быть открыты
+# 7881/tcp и 7882/udp (их публикует docker-compose).
+#
+# Запуск: caddy run --config /etc/caddy/Caddyfile
+# Проверка конфига: caddy validate --config /etc/caddy/Caddyfile
+
+{
+	# Писать логи в stdout (docker/systemd) — или задать свой формат:
+	# log {
+	#     output file /var/log/caddy/studyroom.log
+	#     format json
+	# }
+}
+
+study-room.quietroom.name {
+	encode gzip zstd
+
+	reverse_proxy 127.0.0.1:8080 {
+		# Долгие WebSocket-соединения чата (Reverb) не рвём по таймауту.
+		transport http {
+			read_timeout 0
+			write_timeout 0
+		}
+	}
+}
+
+livekit.quietroom.name {
+	reverse_proxy 127.0.0.1:7880 {
+		transport http {
+			read_timeout 0
+			write_timeout 0
+		}
+	}
+}
+
+# Если DNS ещё не настроен и нужен сертификат сейчас — раскомментируйте
+# самоподписанный вариант (браузер предупредит о сертификате):
+#
+# study-room.quietroom.name {
+#     tls internal
+#     reverse_proxy 127.0.0.1:8080
+# }

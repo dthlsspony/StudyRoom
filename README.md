@@ -264,11 +264,25 @@ docker compose down -v               # полный сброс вместе с �
 
 ### Обратный прокси
 
-Готовый конфиг — `deploy/nginx.conf.example`. Он терминирует TLS и передаёт:
+Готовые конфиги: `deploy/Caddyfile.example` (Caddy) и `deploy/nginx.conf.example` (nginx).
+Оба терминируют TLS и передают:
 
 - `study-room.quietroom.name` → контейнер `web` (порт 8080): фронтенд, `/api/*`
   и WebSocket чата `/app/{REVERB_APP_KEY}`;
 - `livekit.quietroom.name` → контейнер `livekit` (порт 7880): сигналинг LiveKit.
+
+С Caddy всё почти сводится к двум блокам — сертификаты Let's Encrypt он выпускает
+и обновляет сам, WebSocket-апгрейд обрабатывает из коробки:
+
+```caddyfile
+study-room.quietroom.name {
+    reverse_proxy 127.0.0.1:8080
+}
+
+livekit.quietroom.name {
+    reverse_proxy 127.0.0.1:7880
+}
+```
 
 Медиа WebRTC идёт мимо прокси напрямую, поэтому в firewall должны быть открыты
 **7881/tcp** и **7882/udp** (их публикует `docker-compose.yml`).
