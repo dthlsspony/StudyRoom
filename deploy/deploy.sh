@@ -178,6 +178,42 @@ db_name()  { env_get DB_DATABASE studyroom; }
 app_port() { env_get APP_PORT 8080; }
 lk_port()  { env_get LIVEKIT_HTTP_PORT 7880; }
 
+# Вызов docker compose с необязательным дополнительным файлом
+# (COMPOSE_EXTRA_FILE) — так можно убрать публикацию ненужных портов.
+compose() {
+    if [ -n "${COMPOSE_EXTRA_FILE:-}" ] && [ -f "$COMPOSE_EXTRA_FILE" ]; then
+        compose -f docker-compose.yml -f "$COMPOSE_EXTRA_FILE" "$@"
+    else
+        compose "$@"
+    fi
+}
+
+# Порты, которые compose реально публикует на хосте: "порт/протокол".
+published_ports() {
+    local json
+    json="$(compose config --format json 2>/dev/null || true)"
+    [ -n "$json" ] || return 0
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        return 0
+    fi
+
+    printf '%s' "$json" | python3 -c '
+import json, sys
+try:
+    cfg = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for name, svc in (cfg.get("services") or {}).items():
+    for p in (svc.get("ports") or []):
+        if isinstance(p, dict):
+            published = p.get("published")
+            proto = p.get("protocol", "tcp")
+            if published:
+                print("%s/%s" % (published, proto))
+'
+}
+
 # Занят ли порт на хосте. Порты, которые уже публикуют наши собственные
 # контейнеры, заняты законно — их игнорируем.
 port_busy() {
@@ -185,7 +221,7 @@ port_busy() {
 
     [ -n "$port" ] || return 1
 
-    if docker compose ps --format '{{.Ports}}' 2>/dev/null | grep -q ":${port}->"; then
+    if compose ps --format '{{.Ports}}' 2>/dev/null | grep -q ":${port}->"; then
         return 1
     fi
 
@@ -244,7 +280,7 @@ preflight() {
     step "Префлайт"
 
     command -v docker >/dev/null 2>&1 || die "docker не найден в PATH"
-    docker compose version >/dev/null 2>&1 || die "не найден плагин docker compose (v2)"
+    compose version >/dev/null 2>&1 || die "не найден плагин compose (v2)"
 
     if [ ! -f .env ]; then
         cp .env.example .env
@@ -280,36 +316,38 @@ preflight() {
 check_ports() {
     step "Проверка портов"
 
-    local busy=0
-    local db_published
-    db_published="$(env_get DB_PUBLISHED_PORT 5432)"
+    # подсказка по каждому порту: какая переменная его задаёт
+    hint_for_port() {
+        case "$1" in
+            "$(env_get DB_PUBLISHED_PORT 5432)") echo "DB_PUBLISHED_PORT|порт БД на хосте — если свой Postgres уже слушает 5432, поставьте свободный (например 5433)" ;;
+            "$(env_get REVERB_PUBLISHED_PORT 8081)") echo "REVERB_PUBLISHED_PORT|порт Reverb на хосте — в бою можно его не публиковать вовсе (см. COMPOSE_EXTRA_FILE)" ;;
+            "$(app_port)") echo "APP_PORT|порт приложения — на него смотрит обратный прокси" ;;
+            "$(lk_port)") echo "LIVEKIT_HTTP_PORT|порт сигналинга LiveKit" ;;
+            "$(env_get LIVEKIT_TCP_PORT 7881)") echo "LIVEKIT_TCP_PORT|порт ICE поверх TCP у LiveKit" ;;
+            "$(env_get LIVEKIT_UDP_PORT 7882)") echo "LIVEKIT_UDP_PORT|порт медиа LiveKit (UDP) — LiveKit объявляет его в ICE-кандидатах, его публиковать обязательно" ;;
+            "$(env_get VITE_PORT 5173)") echo "VITE_PORT|порт dev-сервера фронтенда" ;;
+            *) echo "|порт не публикуется наружу" ;;
+        esac
+    }
 
-    # проверяем: порт, протокол, имя переменной, подсказка
-    local -a checks=(
-        "$db_published|tcp|DB_PUBLISHED_PORT|порт БД на хосте — если свой Postgres уже слушает 5432, поставьте свободный порт (например 5433)"
-        "$(app_port)|tcp|APP_PORT|порт приложения (его слушает nginx из контейнера web)"
-        "$(lk_port)|tcp|LIVEKIT_HTTP_PORT|порт сигналинга LiveKit"
-        "$(env_get LIVEKIT_TCP_PORT 7881)|tcp|LIVEKIT_TCP_PORT|порт ICE поверх TCP у LiveKit"
-        "$(env_get LIVEKIT_UDP_PORT 7882)|udp|LIVEKIT_UDP_PORT|порт медиа LiveKit (UDP) — LiveKit объявляет его в ICE-кандидатах"
-        "$(env_get REVERB_PUBLISHED_PORT 8081)|tcp|REVERB_PUBLISHED_PORT|порт Reverb на хосте — если 8081 занят, поставьте свободный"
-        "$(env_get VITE_PORT 5173)|tcp|VITE_PORT|порт dev-сервера фронтенда"
-    )
-
-    local entry port proto var hint
-    for entry in "${checks[@]}"; do
-        IFS='|' read -r port proto var hint <<< "$entry"
+    local busy=0 entry port proto var hint
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        port="${entry%%/*}"
+        proto="${entry##*/}"
+        IFS='|' read -r var hint <<< "$(hint_for_port "$port")"
         if port_busy "$port" "$proto"; then
             fail "порт $port ($proto) уже занят на хосте — переменная $var"
-            warn "$hint"
+            [ -n "$hint" ] && warn "$hint"
             busy=1
         fi
-    done
+    done <<< "$(published_ports)"
 
     if [ "$busy" -eq 1 ]; then
         die "сначала освободите порты или смените их в .env — деплой остановлен до изменений"
     fi
 
-    ok "все порты свободны"
+    ok "все публикуемые порты свободны"
 }
 
 # ===========================================================================
@@ -323,7 +361,7 @@ ensure_secrets() {
     # Пароль БД: у живого контейнера Postgres пароль задаётся при инициализации
     # тома, поэтому менять его после первого запуска нельзя.
     local container volume_name db_initialized=0
-    container="$(docker compose ps -q db 2>/dev/null || true)"
+    container="$(compose ps -q db 2>/dev/null || true)"
     if [ -n "$container" ]; then
         volume_name="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' "$container" 2>/dev/null || true)"
         [ -n "$volume_name" ] && db_initialized=1
@@ -335,7 +373,7 @@ ensure_secrets() {
         if [ "$db_initialized" -eq 1 ]; then
             # БД уже живёт со старым паролем — меняем его и в Postgres,
             # и в .env, иначе приложение перестанет подключаться.
-            if docker compose exec -T db psql -U "$(db_user)" -d "$(db_name)" -tAc \
+            if compose exec -T db psql -U "$(db_user)" -d "$(db_name)" -tAc \
                 "ALTER USER \"$(db_user)\" WITH PASSWORD '$new_pass'" >/dev/null 2>&1; then
                 env_set DB_PASSWORD "$new_pass"
                 ok "пароль БД заменён на сгенерированный (и в Postgres, и в .env)"
@@ -384,8 +422,8 @@ ensure_secrets() {
     # из скелета Laravel — заменяем.
     if is_placeholder "$(laravel_env_get APP_KEY)" || \
        [ "$(laravel_env_get APP_KEY)" = "base64:wISUzyhEUHPoce8CFCbKGuZxSvB/mt6xNyapGEMiTdM=" ]; then
-        if docker compose ps --status running --services 2>/dev/null | grep -qx app; then
-            docker compose exec -T app php artisan key:generate --force --no-interaction >/dev/null
+        if compose ps --status running --services 2>/dev/null | grep -qx app; then
+            compose exec -T app php artisan key:generate --force --no-interaction >/dev/null
             ok "сгенерирован APP_KEY"
         else
             laravel_env_set APP_KEY "base64:$(random_hex 48)"
@@ -422,8 +460,8 @@ backup() {
 
     mkdir -p "$BACKUP_DIR"
 
-    if docker compose ps --status running --services 2>/dev/null | grep -qx db; then
-        if docker compose exec -T db pg_dump -U "$(db_user)" -d "$(db_name)" -Fc > "$BACKUP_DIR/db.dump" 2>/dev/null \
+    if compose ps --status running --services 2>/dev/null | grep -qx db; then
+        if compose exec -T db pg_dump -U "$(db_user)" -d "$(db_name)" -Fc > "$BACKUP_DIR/db.dump" 2>/dev/null \
             && [ -s "$BACKUP_DIR/db.dump" ]; then
             BACKUP_DUMP="$BACKUP_DIR/db.dump"
             ok "дамп БД сохранён ($(du -h "$BACKUP_DUMP" | cut -f1))"
@@ -436,7 +474,7 @@ backup() {
 
     # Образы: запоминаем имя и ID, чтобы вернуть именно прежнюю сборку.
     local images img img_id marker
-    images="$(docker compose config --images 2>/dev/null | sort -u || true)"
+    images="$(compose config --images 2>/dev/null | sort -u || true)"
     for img in $images; do
         if img_id="$(docker image inspect -f '{{.Id}}' "$img" 2>/dev/null)" && [ -n "$img_id" ]; then
             # Метка с безопасным именем: у образа может уже быть свой тег.
@@ -467,14 +505,14 @@ update() {
 
     if [ "$SKIP_PULL" -eq 0 ]; then
         step "Обновление базовых образов"
-        docker compose pull --quiet --ignore-buildable db livekit || warn "pull базовых образов не удался"
+        compose pull --quiet --ignore-buildable db livekit || warn "pull базовых образов не удался"
     fi
 
     step "Сборка образов"
-    if ! docker compose build --pull app web frontend; then
+    if ! compose build --pull app web frontend; then
         # Реестр недоступен или сеть моргнула — собираем на локальном кэше.
         warn "сборка с обновлением базовых образов не удалась, пробуем без него"
-        docker compose build app web frontend || die "сборка образов не удалась"
+        compose build app web frontend || die "сборка образов не удалась"
     fi
     ok "образы собраны"
 }
@@ -485,13 +523,13 @@ update() {
 deploy() {
     step "Деплой"
 
-    docker compose up -d --remove-orphans
+    compose up -d --remove-orphans
     DEPLOY_STARTED=1
     ok "контейнеры запущены"
 
     # Ждём готовности БД
     local waited=0
-    until docker compose exec -T db pg_isready -U "$(db_user)" -d "$(db_name)" >/dev/null 2>&1; do
+    until compose exec -T db pg_isready -U "$(db_user)" -d "$(db_name)" >/dev/null 2>&1; do
         waited=$((waited + 5))
         [ "$waited" -gt 180 ] && die "БД не поднялась за 3 минуты"
         sleep 5
@@ -515,19 +553,19 @@ verify() {
     step "Проверка"
 
     local services svc code
-    services="$(docker compose config --services 2>/dev/null || true)"
+    services="$(compose config --services 2>/dev/null || true)"
     for svc in $services; do
-        if ! docker compose ps --status running --services 2>/dev/null | grep -qx "$svc"; then
+        if ! compose ps --status running --services 2>/dev/null | grep -qx "$svc"; then
             die "контейнер $svc не запущен"
         fi
     done
     ok "все контейнеры запущены: $(echo $services | tr '\n' ' ')"
 
-    docker compose exec -T db pg_isready -U "$(db_user)" -d "$(db_name)" >/dev/null \
+    compose exec -T db pg_isready -U "$(db_user)" -d "$(db_name)" >/dev/null \
         || die "Postgres не отвечает"
 
     local tables
-    tables="$(docker compose exec -T db psql -U "$(db_user)" -d "$(db_name)" -tAc \
+    tables="$(compose exec -T db psql -U "$(db_user)" -d "$(db_name)" -tAc \
         "select count(*) from information_schema.tables where table_schema='public'" 2>/dev/null | tr -d '[:space:]' || true)"
     case "$tables" in
         ''|*[!0-9]*) die "БД недоступна из приложения" ;;
@@ -586,7 +624,7 @@ rollback() {
     old_pass="$(grep -E '^DB_PASSWORD=' "$BACKUP_ENV" 2>/dev/null | head -1 | cut -d= -f2- || true)"
     current_pass="${DB_PASS_BEFORE:-}"
     if [ -n "$old_pass" ] && [ "$old_pass" != "$current_pass" ]; then
-        if docker compose exec -T db psql -U "$(db_user)" -d "$(db_name)" -tAc \
+        if compose exec -T db psql -U "$(db_user)" -d "$(db_name)" -tAc \
             "ALTER USER \"$(db_user)\" WITH PASSWORD '$old_pass'" >/dev/null 2>&1; then
             ok "прежний пароль БД возвращён"
         else
@@ -610,12 +648,12 @@ rollback() {
         warn "образы вернуть не удалось"
     fi
 
-    docker compose up -d --no-build --force-recreate --remove-orphans \
+    compose up -d --no-build --force-recreate --remove-orphans \
         || warn "не удалось пересоздать контейнеры на старых образах"
     ok "контейнеры пересозданы на предыдущей версии"
 
     if [ -n "$BACKUP_DUMP" ] && [ -s "$BACKUP_DUMP" ]; then
-        if docker compose exec -T db pg_restore -U "$(db_user)" -d "$(db_name)" --clean --if-exists \
+        if compose exec -T db pg_restore -U "$(db_user)" -d "$(db_name)" --clean --if-exists \
             < "$BACKUP_DUMP" >/dev/null 2>&1; then
             ok "база восстановлена из дампа"
         else
@@ -648,7 +686,7 @@ main() {
         step "Будет сделано"
         echo "  • сгенерированы недостающие секреты в .env"
         echo "  • дамп БД: deploy/backups/$TS/db.dump"
-        echo "  • docker compose pull + build + up -d"
+        echo "  • compose pull + build + up -d"
         echo "  • проверки: контейнеры, БД, /up, API, LiveKit, WebSocket чата"
         echo "  • при ошибке — откат образов и БД"
         return 0
