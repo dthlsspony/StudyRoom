@@ -182,36 +182,34 @@ lk_port()  { env_get LIVEKIT_HTTP_PORT 7880; }
 # (COMPOSE_EXTRA_FILE) — так можно убрать публикацию ненужных портов.
 compose() {
     if [ -n "${COMPOSE_EXTRA_FILE:-}" ] && [ -f "$COMPOSE_EXTRA_FILE" ]; then
-        compose -f docker-compose.yml -f "$COMPOSE_EXTRA_FILE" "$@"
+        docker compose -f docker-compose.yml -f "$COMPOSE_EXTRA_FILE" "$@"
     else
-        compose "$@"
+        docker compose "$@"
     fi
 }
 
 # Порты, которые compose реально публикует на хосте: "порт/протокол".
+# Разбор идёт через awk — без python, чтобы не зависеть от его наличия.
 published_ports() {
     local json
     json="$(compose config --format json 2>/dev/null || true)"
     [ -n "$json" ] || return 0
 
-    if ! command -v python3 >/dev/null 2>&1; then
-        return 0
-    fi
-
-    printf '%s' "$json" | python3 -c '
-import json, sys
-try:
-    cfg = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-for name, svc in (cfg.get("services") or {}).items():
-    for p in (svc.get("ports") or []):
-        if isinstance(p, dict):
-            published = p.get("published")
-            proto = p.get("protocol", "tcp")
-            if published:
-                print("%s/%s" % (published, proto))
-'
+    printf '%s' "$json" | tr '{' '\n' | awk '
+        {
+            port = ""
+            proto = "tcp"
+            if (match($0, /"published": *"[0-9]+"/)) {
+                port = substr($0, RSTART, RLENGTH)
+                gsub(/[^0-9]/, "", port)
+            }
+            if (match($0, /"protocol": *"[a-z]+"/)) {
+                proto = substr($0, RSTART, RLENGTH)
+                gsub(/[^a-z]/, "", proto)
+            }
+            if (port != "") print port "/" proto
+        }
+    '
 }
 
 # Занят ли порт на хосте. Порты, которые уже публикуют наши собственные
@@ -221,7 +219,7 @@ port_busy() {
 
     [ -n "$port" ] || return 1
 
-    if compose ps --format '{{.Ports}}' 2>/dev/null | grep -q ":${port}->"; then
+    if compose ps --format '{{.Ports}}' 2>/dev/null | grep -F -q ":${port}->"; then
         return 1
     fi
 
