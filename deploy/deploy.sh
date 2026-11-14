@@ -60,6 +60,7 @@ DEPLOY_STARTED=0
 BACKUP_DUMP=""
 BACKUP_ENV=""
 BACKUP_ENV_LARAVEL=""
+DB_PASS_BEFORE=""
 PREV_IMAGES=()
 
 # ---------------------------------------------------------------------------
@@ -73,6 +74,10 @@ handle_failure() {
     LAST_ERROR="$reason"
 
     fail "Деплой не удался: $reason"
+
+    # Запоминаем пароль БД до восстановления .env: иначе сравнение не увидит
+    # разницы и в Postgres останется уже сменённый пароль.
+    DB_PASS_BEFORE="$(env_get DB_PASSWORD)"
 
     # .env восстанавливаем всегда: секреты могли смениться до падения
     if [ -n "$BACKUP_ENV" ] && [ -f "$BACKUP_ENV" ]; then
@@ -142,6 +147,30 @@ random_hex() {
     else
         LC_ALL=C tr -dc 'a-f0-9' </dev/urandom | dd bs=1 count="$len" 2>/dev/null || true
     fi
+}
+
+# Похоже ли значение на «заглушку» из .env.example: такие секреты нужно
+# заменить перед выкладкой в бой.
+is_placeholder() {
+    local value="${1:-}"
+    local lower
+    lower="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+
+    [ -z "$lower" ] && return 0
+
+    case "$lower" in
+        devkey|devsecret|secret|password|changeme|change_me|studyroomappkey|studyroomappsecret|example)
+            return 0 ;;
+        studyroom|postgres|laravel|root|admin)
+            return 0 ;;
+    esac
+
+    case "$lower" in
+        devsecret*|change_me*|changeme*|your-*|replace*|todo*|xxx*)
+            return 0 ;;
+    esac
+
+    return 1
 }
 
 db_user()  { env_get DB_USERNAME studyroom; }
@@ -235,34 +264,43 @@ ensure_secrets() {
         [ -n "$volume_name" ] && db_initialized=1
     fi
 
-    if [ -z "$(env_get DB_PASSWORD)" ]; then
+    if is_placeholder "$(env_get DB_PASSWORD)"; then
+        local new_pass
+        new_pass="$(random_hex 32)"
         if [ "$db_initialized" -eq 1 ]; then
-            env_set DB_PASSWORD "$(env_get DB_PASSWORD studyroom)"
-            warn "БД уже инициализирована, а DB_PASSWORD в .env отсутствует — пароль оставлен как есть"
+            # БД уже живёт со старым паролем — меняем его и в Postgres,
+            # и в .env, иначе приложение перестанет подключаться.
+            if docker compose exec -T db psql -U "$(db_user)" -d "$(db_name)" -tAc \
+                "ALTER USER \"$(db_user)\" WITH PASSWORD '$new_pass'" >/dev/null 2>&1; then
+                env_set DB_PASSWORD "$new_pass"
+                ok "пароль БД заменён на сгенерированный (и в Postgres, и в .env)"
+            else
+                warn "не удалось сменить пароль в Postgres — оставлен прежний"
+            fi
         else
-            env_set DB_PASSWORD "$(random_hex 32)"
+            env_set DB_PASSWORD "$new_pass"
             ok "сгенерирован пароль БД"
         fi
         changed=1
     fi
 
-    if [ -z "$(env_get LIVEKIT_API_KEY)" ] || [ "$(env_get LIVEKIT_API_KEY)" = "devkey" ]; then
+    if is_placeholder "$(env_get LIVEKIT_API_KEY)"; then
         env_set LIVEKIT_API_KEY "srk_$(random_hex 16)"
         ok "сгенерирован ключ LiveKit"
         changed=1
     fi
-    if [ -z "$(env_get LIVEKIT_API_SECRET)" ] || [ "$(env_get LIVEKIT_API_SECRET)" = "devsecret_change_me_0123456789abcdefghij" ]; then
+    if is_placeholder "$(env_get LIVEKIT_API_SECRET)"; then
         env_set LIVEKIT_API_SECRET "$(random_hex 48)"
         ok "сгенерирован секрет LiveKit"
         changed=1
     fi
 
-    if [ -z "$(env_get REVERB_APP_KEY)" ] || [ "$(env_get REVERB_APP_KEY)" = "studyroomappkey" ]; then
+    if is_placeholder "$(env_get REVERB_APP_KEY)"; then
         env_set REVERB_APP_KEY "srk_$(random_hex 16)"
         ok "сгенерирован ключ Reverb"
         changed=1
     fi
-    if [ -z "$(env_get REVERB_APP_SECRET)" ] || [ "$(env_get REVERB_APP_SECRET)" = "studyroomappsecret" ]; then
+    if is_placeholder "$(env_get REVERB_APP_SECRET)"; then
         env_set REVERB_APP_SECRET "$(random_hex 48)"
         ok "сгенерирован секрет Reverb"
         changed=1
@@ -277,8 +315,10 @@ ensure_secrets() {
     fi
 
     # APP_KEY живёт в backend/.env: перегенерировать его на каждом деплое
-    # нельзя — это отозвало бы все выданные токены.
-    if [ -z "$(laravel_env_get APP_KEY)" ]; then
+    # нельзя — это отозвало бы все выданные токены. Но если там заглушка
+    # из скелета Laravel — заменяем.
+    if is_placeholder "$(laravel_env_get APP_KEY)" || \
+       [ "$(laravel_env_get APP_KEY)" = "base64:wISUzyhEUHPoce8CFCbKGuZxSvB/mt6xNyapGEMiTdM=" ]; then
         if docker compose ps --status running --services 2>/dev/null | grep -qx app; then
             docker compose exec -T app php artisan key:generate --force --no-interaction >/dev/null
             ok "сгенерирован APP_KEY"
@@ -473,6 +513,20 @@ rollback() {
     if [ -n "${BACKUP_ENV_LARAVEL:-}" ] && [ -f "$BACKUP_ENV_LARAVEL" ]; then
         cp "$BACKUP_ENV_LARAVEL" backend/.env
         ok "backend/.env восстановлен"
+    fi
+
+    # Если пароль БД успели поменять — возвращаем прежний и в Postgres,
+    # иначе приложение останется без доступа к базе.
+    local old_pass current_pass
+    old_pass="$(grep -E '^DB_PASSWORD=' "$BACKUP_ENV" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+    current_pass="${DB_PASS_BEFORE:-}"
+    if [ -n "$old_pass" ] && [ "$old_pass" != "$current_pass" ]; then
+        if docker compose exec -T db psql -U "$(db_user)" -d "$(db_name)" -tAc \
+            "ALTER USER \"$(db_user)\" WITH PASSWORD '$old_pass'" >/dev/null 2>&1; then
+            ok "прежний пароль БД возвращён"
+        else
+            warn "не удалось вернуть прежний пароль БД — проверьте .env вручную"
+        fi
     fi
 
     # Возвращаем прежние образы по сохранённым ID
