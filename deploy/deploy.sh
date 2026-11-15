@@ -661,6 +661,16 @@ update() {
         compose build app web frontend || die "сборка образов не удалась"
     fi
     ok "образы собраны"
+
+    step "Сборка фронтенда"
+    # Образ фронтенда только запускает dev-сервер. Собранный бандл нужен
+    # контейнеру web: он раздаёт frontend/dist с хоста, поэтому собираем
+    # прямо в рабочем каталоге (bind-mount пишет на хост).
+    # Каталог создаём на хосте: Docker Desktop не умеет создавать новые
+    # каталоги внутри bind-mount с Windows-хоста.
+    mkdir -p "$ROOT/frontend/dist"
+    compose run --rm -T --no-deps frontend sh -c 'mkdir -p dist && npm run build'         || die "сборка фронтенда не удалась"
+    ok "фронтенд собран в frontend/dist"
 }
 
 # ===========================================================================
