@@ -18,8 +18,21 @@
 #
 # Запуск: caddy run --config /etc/caddy/Caddyfile
 # Проверка конфига: caddy validate --config /etc/caddy/Caddyfile
+#
+# Если сертификат не выпускается — смотрите лог Caddy:
+#   journalctl -u caddy -n 100 --no-pager | grep -iE "acme|challenge|certificate|error"
+# Типовые причины: сервер не достучится до ACME-сервиса (закрыт исходящий
+# 443), не проброшен порт 80 для проверки домена, истёк лимит Let's Encrypt,
+# либо у домена есть AAAA-запись, указывающая на недоступный адрес.
+# Проверить, что сертификат вообще выпущен: https://crt.sh/?q=ваш-домен
+# (в выдаче должен появиться домен).
 
 {
+	# Почта для аккаунта ACME — по ней приходят уведомления об истечении
+	# сертификата. Без неё Caddy всё равно выпустит сертификат, но вы его
+	# не увидите заранее.
+	email admin@quietroom.name
+
 	# Писать логи в stdout (docker/systemd) — или задать свой формат:
 	# log {
 	#     output file /var/log/caddy/studyroom.log
