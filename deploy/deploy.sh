@@ -371,13 +371,13 @@ check_ports() {
                 echo "REVERB_PUBLISHED_PORT|8081|порт Reverb на хосте — в бою его можно не публиковать вовсе (COMPOSE_EXTRA_FILE)" ;;
             "$(app_port)")
                 echo "APP_PORT||порт приложения — на него смотрит обратный прокси, менять нужно и в Caddy" ;;
-            "$(lk_port)"
+            "$(lk_port)")
                 echo "LIVEKIT_HTTP_PORT||порт сигналинга LiveKit — на него смотрит обратный прокси, задаётся вручную" ;;
             "$(env_get LIVEKIT_TCP_PORT 7881)")
                 echo "LIVEKIT_TCP_PORT||порт ICE поверх TCP у LiveKit, задаётся вручную" ;;
-            "$(env_get LIVEKIT_UDP_PORT 7882)"
+            "$(env_get LIVEKIT_UDP_PORT 7882)")
                 echo "LIVEKIT_UDP_PORT||порт медиа LiveKit (UDP) — LiveKit объявляет его в ICE-кандидатах, задаётся вручную" ;;
-            "$(env_get VITE_PORT 5173)"
+            "$(env_get VITE_PORT 5173)")
                 echo "VITE_PORT||порт dev-сервера фронтенда, задаётся вручную" ;;
             *) echo "||порт не публикуется наружу" ;;
         esac
