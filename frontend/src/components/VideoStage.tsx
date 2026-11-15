@@ -44,6 +44,13 @@ function VideoTile({
       }
       const element = track.attach()
       element.classList.add(track.kind === Track.Kind.Video ? 'lk-video' : 'lk-audio')
+
+      // Собственный микрофон не должен звучать в собственных наушниках:
+      // LiveKit не отправляет его собеседникам, но локально трек проигрывается.
+      if (isLocal && track.kind === Track.Kind.Audio) {
+        element.muted = true
+      }
+
       container.appendChild(element)
       attached.push({ track, element })
     })
@@ -54,7 +61,7 @@ function VideoTile({
         element.remove()
       })
     }
-  }, [participant, tick])
+  }, [participant, tick, isLocal])
 
   const name = participant.name || participant.identity
 
