@@ -18,6 +18,7 @@ x-app-env: &app-env
   LIVEKIT_WEBHOOK_URL: ${LIVEKIT_WEBHOOK_URL:-http://web/api/v1/livekit/webhook}
   REVERB_APP_ID: ${REVERB_APP_ID:-studyroom}
   REVERB_APP_KEY: ${REVERB_APP_KEY:-studyroomappkey}
+  REVERB_APP_SECRET: ${REVERB_APP_SECRET:-studyroomappsecret}
   REVERB_HOST: ${REVERB_HOST:-localhost}
   # Внутренний порт Reverb: backend и сам Reverb живут в одном контейнере.
   REVERB_PORT: 8081
