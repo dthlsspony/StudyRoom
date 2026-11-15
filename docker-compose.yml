@@ -5,6 +5,9 @@ x-app-env: &app-env
   APP_ENV: ${APP_ENV:-local}
   APP_DEBUG: ${APP_DEBUG:-true}
   APP_URL: ${APP_URL:-http://localhost:8080}
+  # Драйвер вещания: без него Laravel берёт NullBroadcaster, у которого auth()
+  # возвращает пустоту — подписка на каналы и рассылка событий не работают.
+  BROADCAST_CONNECTION: ${BROADCAST_CONNECTION:-reverb}
   DB_CONNECTION: ${DB_CONNECTION:-pgsql}
   DB_HOST: ${DB_HOST:-db}
   DB_PORT: ${DB_PORT:-5432}
