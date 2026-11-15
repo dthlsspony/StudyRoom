@@ -360,8 +360,9 @@ preflight() {
 check_ports() {
     step "Проверка портов"
 
-    # Для каждого опубликованного порта: какая переменная его задаёт, какое
-    # значение считается «не заданным» (тогда подберём свободный сами) и подсказка.
+    # Для каждого опубликованного порта: какая переменная его задаёт, можно ли
+    # подобрать порт автоматически (второе поле: пусто — нельзя, порт указан
+    # вручную, потому что на него ссылаются Caddy или firewall) и подсказка.
     spec_for_port() {
         case "$1" in
             "$(env_get DB_PUBLISHED_PORT 5432)")
@@ -369,15 +370,15 @@ check_ports() {
             "$(env_get REVERB_PUBLISHED_PORT 8081)")
                 echo "REVERB_PUBLISHED_PORT|8081|порт Reverb на хосте — в бою его можно не публиковать вовсе (COMPOSE_EXTRA_FILE)" ;;
             "$(app_port)")
-                echo "APP_PORT|8080|порт приложения — на него смотрит обратный прокси, менять нужно в Caddy тоже" ;;
-            "$(lk_port)")
-                echo "LIVEKIT_HTTP_PORT|7880|порт сигналинга LiveKit — на него смотрит обратный прокси" ;;
+                echo "APP_PORT||порт приложения — на него смотрит обратный прокси, менять нужно и в Caddy" ;;
+            "$(lk_port)"
+                echo "LIVEKIT_HTTP_PORT||порт сигналинга LiveKit — на него смотрит обратный прокси, задаётся вручную" ;;
             "$(env_get LIVEKIT_TCP_PORT 7881)")
-                echo "LIVEKIT_TCP_PORT|7881|порт ICE поверх TCP у LiveKit" ;;
-            "$(env_get LIVEKIT_UDP_PORT 7882)")
-                echo "LIVEKIT_UDP_PORT|7882|порт медиа LiveKit (UDP) — LiveKit объявляет его в ICE-кандидатах, публиковать обязательно" ;;
-            "$(env_get VITE_PORT 5173)")
-                echo "VITE_PORT|5173|порт dev-сервера фронтенда" ;;
+                echo "LIVEKIT_TCP_PORT||порт ICE поверх TCP у LiveKit, задаётся вручную" ;;
+            "$(env_get LIVEKIT_UDP_PORT 7882)"
+                echo "LIVEKIT_UDP_PORT||порт медиа LiveKit (UDP) — LiveKit объявляет его в ICE-кандидатах, задаётся вручную" ;;
+            "$(env_get VITE_PORT 5173)"
+                echo "VITE_PORT||порт dev-сервера фронтенда, задаётся вручную" ;;
             *) echo "||порт не публикуется наружу" ;;
         esac
     }
