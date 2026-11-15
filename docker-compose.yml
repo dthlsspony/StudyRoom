@@ -86,10 +86,13 @@ services:
       - "${VITE_PORT:-5173}:5173"
     environment:
       VITE_API_URL: ""
-      VITE_REVERB_KEY: ${REVERB_APP_KEY:-studyroomappkey}
-      VITE_REVERB_HOST: ${REVERB_HOST:-localhost}
+      # Адрес Reverb для браузера и для backend — разные вещи: backend ходит
+      # в Reverb внутри контейнера (localhost), браузер — через домен. Поэтому
+      # VITE_* берутся из своих переменных, а не из REVERB_*.
+      VITE_REVERB_KEY: ${VITE_REVERB_KEY:-${REVERB_APP_KEY:-studyroomappkey}}
+      VITE_REVERB_HOST: ${VITE_REVERB_HOST:-${REVERB_HOST:-localhost}}
       VITE_REVERB_PORT: ${VITE_REVERB_PORT:-${REVERB_PUBLISHED_PORT:-8081}}
-      VITE_REVERB_SCHEME: ${REVERB_SCHEME:-http}
+      VITE_REVERB_SCHEME: ${VITE_REVERB_SCHEME:-${REVERB_SCHEME:-http}}
     volumes:
       - ./frontend:/app
       - frontend_node_modules:/app/node_modules
