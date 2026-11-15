@@ -426,6 +426,32 @@ check_ports() {
     ok "все публикуемые порты свободны"
 }
 
+# Сверяем цели обратного прокси с портами из .env: если Caddy смотрит не туда,
+# домен будет отдавать чужой сервис (например Reverb вместо приложения).
+check_reverse_proxy() {
+    local file="${CADDYFILE:-/etc/caddy/Caddyfile}"
+    [ -f "$file" ] || return 0
+
+    local targets app_target lk_target missing
+    targets="$(grep -oE 'reverse_proxy[[:space:]]+[0-9.]+:[0-9]+' "$file" 2>/dev/null | grep -oE '[0-9]+$' | sort -u | tr '
+' ' ')"
+    [ -n "$targets" ] || return 0
+
+    app_target="$(app_port)"
+    lk_target="$(lk_port)"
+    missing=""
+
+    printf '%s' "$targets" | grep -qw "$app_target" || missing="$missing APP_PORT($app_target)"
+    printf '%s' "$targets" | grep -qw "$lk_target"  || missing="$missing LIVEKIT_HTTP_PORT($lk_target)"
+
+    if [ -n "$missing" ]; then
+        warn "Caddyfile ($file) проксирует на порты:$targets"
+        warn "в .env этих портов нет среди целей прокси:$missing — домен будет отдавать не то"
+    else
+        ok "Caddyfile проксирует на нужные порты ($targets)"
+    fi
+}
+
 # ===========================================================================
 # 2. Секреты
 # ===========================================================================
@@ -814,6 +840,7 @@ main() {
 
     preflight
     check_ports
+    check_reverse_proxy
     ensure_secrets
     fix_internal_settings
     backup
