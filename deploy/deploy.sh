@@ -671,6 +671,18 @@ update() {
     mkdir -p "$ROOT/frontend/dist"
     compose run --rm -T --no-deps frontend sh -c 'mkdir -p dist && npm run build'         || die "сборка фронтенда не удалась"
     ok "фронтенд собран в frontend/dist"
+
+    # Проверяем, что в бандл попал адрес Reverb из .env: иначе фронтенд будет
+    # стучаться в localhost и чат не заработает.
+    local reverb_host
+    reverb_host="$(env_get VITE_REVERB_HOST)"
+    if [ -n "$reverb_host" ] && [ -d "$ROOT/frontend/dist/assets" ]; then
+        if grep -rqF "$reverb_host" "$ROOT/frontend/dist/assets" 2>/dev/null; then
+            ok "в бандле адрес Reverb: $reverb_host"
+        else
+            warn "в собранном бандле нет адреса $reverb_host — фронтенд собран со старыми значениями, чат не заработает"
+        fi
+    fi
 }
 
 # ===========================================================================
