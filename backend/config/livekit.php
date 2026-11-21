@@ -24,10 +24,12 @@ return [
 
     /*
      | Источники, которые участник может публиковать. canPublishSources
-     | задаёт белый список и заменяет canPublish. Значения — имена элементов
-     | protobuf-enum TrackSource (CAMERA, MICROPHONE, SCREEN_SHARE, ...).
+     | задаёт белый список и заменяет canPublish. ВАЖНО: значения в нижнем
+     | регистре ('camera', 'microphone', 'screen_share', 'screen_share_audio') —
+     | LiveKit сравнивает их с sourceToString() трека регистрозависимо, и
+     | 'MICROPHONE' верхним регистром молча отклоняет публикацию.
      */
-    'publish_sources' => ['CAMERA', 'MICROPHONE', 'SCREEN_SHARE', 'SCREEN_SHARE_AUDIO'],
+    'publish_sources' => ['camera', 'microphone', 'screen_share', 'screen_share_audio'],
 
     'room_prefix' => env('LIVEKIT_ROOM_PREFIX', 'studyroom-'),
 

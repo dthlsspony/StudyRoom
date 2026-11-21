@@ -473,9 +473,11 @@ UDP. В Docker на Windows/Mac это требует двух вещей, ин�
 ### Демонстрация экрана и доступ к устройствам
 
 В grant токена LiveKit передаётся `canPublishSources` — белый список
-источников: `CAMERA`, `MICROPHONE`, `SCREEN_SHARE`, `SCREEN_SHARE_AUDIO`.
-Значения — **имена элементов protobuf-enum** `TrackSource`; в нижнем регистре
-сервер токен не принимает и отклоняет подключение.
+источников: `camera`, `microphone`, `screen_share`, `screen_share_audio`.
+**Регистр важен и только нижний**: LiveKit сравнивает эти строки с
+`sourceToString()` трека (тоже нижний регистр) регистрозависимо. Значения в
+верхнем регистре молча отклоняют публикацию (WARN "no permission to publish
+track" в логах LiveKit), хотя подключение проходит нормально.
 
 ### Камера и микрофон
 
