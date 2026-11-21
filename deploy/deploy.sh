@@ -426,6 +426,40 @@ check_ports() {
     ok "все публикуемые порты свободны"
 }
 
+
+# Проверяем, что объявляемый LiveKit адрес действительно принадлежит этой
+# машине: с чужим адресом браузер не достучится до медиа
+# ("could not establish pc connection").
+check_node_ip() {
+    local node_ip
+    node_ip="$(env_get LIVEKIT_NODE_IP)"
+    [ -n "$node_ip" ] || return 0
+
+    local found=0 tool=""
+    if command -v ip >/dev/null 2>&1; then
+        tool="ip"
+    elif command -v ifconfig >/dev/null 2>&1; then
+        tool="ifconfig"
+    else
+        # Нечем проверить — молча пропускаем, чтобы не пугать зря.
+        return 0
+    fi
+
+    if [ "$tool" = "ip" ]; then
+        ip -4 addr show 2>/dev/null | grep -qw "$node_ip" && found=1
+    else
+        ifconfig 2>/dev/null | grep -w "$node_ip" >/dev/null && found=1
+    fi
+
+    if [ "$found" -eq 1 ]; then
+        ok "LIVEKIT_NODE_IP=$node_ip — адрес этой машины"
+    else
+        warn "LIVEKIT_NODE_IP=$node_ip не является адресом этой машины."
+        warn "  Браузер не достучится до медиа: could not establish pc connection."
+        warn "  Если у сервера есть публичный IP — очистите переменную, LiveKit определит его сам."
+    fi
+}
+
 # Сверяем цели обратного прокси с портами из .env: если Caddy смотрит не туда,
 # домен будет отдавать чужой сервис (например Reverb вместо приложения).
 check_reverse_proxy() {
@@ -880,6 +914,7 @@ main() {
 
     preflight
     check_ports
+    check_node_ip
     check_reverse_proxy
     ensure_secrets
     fix_internal_settings

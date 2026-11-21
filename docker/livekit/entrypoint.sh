@@ -16,8 +16,8 @@ if [ -n "$NODE_IP" ]; then
   use_external_ip: false
   node_ip: ${NODE_IP}"
 else
-    echo "==> ВНИМАНИЕ: LIVEKIT_NODE_IP не задан. Браузер не сможет установить" >&2
-    echo "    WebRTC-соединение с контейнера (нужен IP хоста, доступный браузеру)." >&2
+    echo "==> LIVEKIT_NODE_IP не задан: LiveKit сам определит внешний IP через STUN." >&2
+    echo "    Если сервер за NAT без публичного IP — укажите адрес, доступный браузеру." >&2
     RTC_BLOCK="  udp_port: ${UDP_PORT}
   tcp_port: ${TCP_PORT}
   use_external_ip: true"
