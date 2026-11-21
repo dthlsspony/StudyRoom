@@ -26,7 +26,7 @@ TS="$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="$ROOT/deploy/backups/$TS"
 LOG_DIR="$ROOT/deploy/logs"
 LOG_FILE="$LOG_DIR/deploy-$TS.log"
-ROLLBACK_TAG="rollback-$TS"
+ROLLBACK_MARKER="studyroom-rollback"
 
 SKIP_PULL=0
 SKIP_GIT=0
@@ -41,7 +41,7 @@ for arg in "$@"; do
         --full)      FULL_TEST=1 ;;
         --dry-run)   DRY_RUN=1 ;;
         --simulate-failure) SIMULATE_FAILURE=1 ;;
-        -h|--help)   sed -n '2,23p' "$0"; exit 0 ;;
+        -h|--help)   sed -n '2,24p' "$0"; exit 0 ;;
         *) echo "Неизвестный аргумент: $arg" >&2; exit 2 ;;
     esac
 done
@@ -235,29 +235,14 @@ reserved_ports() {
     done
 }
 
-# Подобрать свободный порт, начиная с заданного. Пропускаем и занятые
-# чужими процессами, и те, что уже публикуют наши контейнеры, и порты,
-# зарезервированные другими переменными .env.
-pick_free_port() {
-    local start="${1:-5400}" port reserved
-    reserved="$(reserved_ports)"
-    for port in $(seq "$start" $((start + 300))); do
-        port_busy "$port" tcp && continue
-        port_ours "$port" && continue
-        printf '%s\n' "$reserved" | grep -Fxq "$port" && continue
-        printf '%s' "$port"
-        return 0
-    done
-    return 1
-}
-
 # Занят ли порт на хосте. Порты, которые уже публикуют наши собственные
 # контейнеры, заняты законно — их игнорируем.
 port_busy() {
+    local port="$1" proto="${2:-tcp}"
 
     [ -n "$port" ] || return 1
 
-    if compose ps --format '{{.Ports}}' 2>/dev/null | grep -F -q ":${port}->"; then
+    if port_ours "$port"; then
         return 1
     fi
 
@@ -286,35 +271,37 @@ port_busy() {
     return 1
 }
 
-# HTTP-код с повторами: сразу после перезапуска контейнеров соединение может
-# кратковременно отваливаться (502/503/504), пока поднимается php-fpm.
-# Это не повод откатывать деплой — ждём и пробуем ещё раз.
-http_code() {
-    local url="$1" tries="${2:-12}" code="" i
-    for i in $(seq 1 "$tries"); do
-        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url" 2>/dev/null || true)"
-        case "$code" in
-            ''|000|502|503|504) sleep 3 ;;
-            *) printf '%s' "$code"; return 0 ;;
-        esac
+# Подобрать свободный порт, начиная с заданного. Пропускаем и занятые
+# чужими процессами, и те, что уже публикуют наши контейнеры, и порты,
+# зарезервированные другими переменными .env.
+pick_free_port() {
+    local start="${1:-5400}" port reserved
+    reserved="$(reserved_ports)"
+    for port in $(seq "$start" $((start + 300))); do
+        port_busy "$port" tcp && continue
+        port_ours "$port" && continue
+        printf '%s\n' "$reserved" | grep -Fxq "$port" && continue
+        printf '%s' "$port"
+        return 0
     done
-    printf '%s' "${code:-000}"
+    return 1
 }
 
-# WebSocket-апгрейд с повторами
-ws_code() {
-    local url="$1" tries="${2:-12}" code="" i
-    for i in $(seq 1 "$tries"); do
-        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
-            -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
-            -H 'Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==' -H 'Sec-WebSocket-Version: 13' \
-            "$url" 2>/dev/null || true)"
-        case "$code" in
-            ''|000|502|503|504) sleep 3 ;;
-            *) printf '%s' "$code"; return 0 ;;
-        esac
+# Приводим скрипты и конфиги к LF: правки на Windows часто оставляют CRLF,
+# а /bin/sh в контейнере падает с "set: illegal option -" на CRLF-файлах.
+normalize_line_endings() {
+    local f
+    for f in docker/livekit/entrypoint.sh docker/php/entrypoint.sh \
+             docker/smoke-test.sh docker/nginx/default.conf docker/php/supervisord.conf \
+             docker/php/php.ini docker-compose.yml; do
+        [ -f "$f" ] || continue
+        # CR ищем и вырезаем по-настоящему, через printf, чтобы правки
+        # на Windows не оставили в самом скрипте управляющих символов.
+        if grep -qU "$(printf '\r')" "$f" 2>/dev/null; then
+            sed -i "$(printf 's/\r$//')" "$f"
+        fi
     done
-    printf '%s' "${code:-000}"
+    ok "переводы строк проверены (LF)"
 }
 
 # ===========================================================================
@@ -426,7 +413,6 @@ check_ports() {
     ok "все публикуемые порты свободны"
 }
 
-
 # Проверяем, что объявляемый LiveKit адрес действительно принадлежит этой
 # машине: с чужим адресом браузер не достучится до медиа
 # ("could not establish pc connection").
@@ -467,8 +453,7 @@ check_reverse_proxy() {
     [ -f "$file" ] || return 0
 
     local targets app_target lk_target missing
-    targets="$(grep -oE 'reverse_proxy[[:space:]]+[0-9.]+:[0-9]+' "$file" 2>/dev/null | grep -oE '[0-9]+$' | sort -u | tr '
-' ' ')"
+    targets="$(grep -oE 'reverse_proxy[[:space:]]+[0-9.]+:[0-9]+' "$file" 2>/dev/null | grep -oE '[0-9]+$' | sort -u | tr '\n' ' ')"
     [ -n "$targets" ] || return 0
 
     app_target="$(app_port)"
@@ -547,7 +532,7 @@ ensure_secrets() {
 
     # Ключ Reverb дублируется во фронтенд: он впечатывается в бандл
     if [ "$changed" -eq 1 ]; then
-        env_set VITE_REVERB_KEY "$(env_get REVERB_APP_KEY)"
+        env_set VITE_REVERB_KEY "$(env_get VITE_REVERB_KEY "$(env_get REVERB_APP_KEY)")"
         env_set VITE_REVERB_HOST "$(env_get VITE_REVERB_HOST localhost)"
         env_set VITE_REVERB_PORT "$(env_get VITE_REVERB_PORT 8081)"
         env_set VITE_REVERB_SCHEME "$(env_get VITE_REVERB_SCHEME http)"
@@ -574,8 +559,6 @@ ensure_secrets() {
         ok "секреты на месте, менять нечего"
     fi
 
-    # Дублируем ключи в backend/.env: приложение вне Docker (например artisan
-    # локально) должно видеть те же значения, что и контейнер.
     # Приводим backend/.env к актуальным значениям: приложение должно видеть
     # те же настройки БД, LiveKit и Reverb, что и контейнеры.
     local key value
@@ -658,13 +641,13 @@ backup() {
     for img in $images; do
         if img_id="$(docker image inspect -f '{{.Id}}' "$img" 2>/dev/null)" && [ -n "$img_id" ]; then
             # Метка с безопасным именем: у образа может уже быть свой тег.
-            marker="studyroom-rollback/$(echo "$img" | tr '/:' '--'):$TS"
+            marker="$ROLLBACK_MARKER/$(echo "$img" | tr '/:' '--'):$TS"
             docker tag "$img_id" "$marker" 2>/dev/null || true
             PREV_IMAGES+=("$img $img_id")
         fi
     done
     if [ "${#PREV_IMAGES[@]}" -gt 0 ]; then
-        ok "образы сохранены для отката: $(printf '%s ' ${PREV_IMAGES[@]})"
+        ok "образы сохранены для отката: $(printf '%s ' "${PREV_IMAGES[@]}")"
     else
         warn "нет локальных образов — откат образов невозможен (первый деплой)"
     fi
@@ -682,8 +665,7 @@ update() {
         # сервер оставался на старой версии compose и кода.
         if ! git pull --ff-only; then
             warn "git pull не удался (правки в рабочем дереве мешают) — продолжаем с текущей версии"
-            warn "изменённые файлы: $(git status --porcelain 2>/dev/null | head -5 | tr '
-' ' ')"
+            warn "изменённые файлы: $(git status --porcelain 2>/dev/null | head -5 | tr '\n' ' ')"
         else
             ok "код обновлён"
         fi
@@ -721,7 +703,8 @@ update() {
     # Каталог создаём на хосте: Docker Desktop не умеет создавать новые
     # каталоги внутри bind-mount с Windows-хоста.
     mkdir -p "$ROOT/frontend/dist"
-    compose run --rm -T --no-deps frontend sh -c 'mkdir -p dist && npm run build'         || die "сборка фронтенда не удалась"
+    compose run --rm -T --no-deps frontend sh -c 'mkdir -p dist && npm run build' \
+        || die "сборка фронтенда не удалась"
     ok "фронтенд собран в frontend/dist"
 
     # Проверяем, что в бандл попал адрес Reverb из .env: иначе фронтенд будет
@@ -884,10 +867,41 @@ rollback() {
     # Убираем метки отката
     for pair in ${PREV_IMAGES[@]+"${PREV_IMAGES[@]}"}; do
         img="${pair%% *}"
-        docker rmi "studyroom-rollback/$(echo "$img" | tr '/:' '--'):$TS" >/dev/null 2>&1 || true
+        docker rmi "$ROLLBACK_MARKER/$(echo "$img" | tr '/:' '--'):$TS" >/dev/null 2>&1 || true
     done
 
     ok "откат завершён"
+}
+
+# HTTP-код с повторами: сразу после перезапуска контейнеров соединение может
+# кратковременно отваливаться (502/503/504), пока поднимается php-fpm.
+# Это не повод откатывать деплой — ждём и пробуем ещё раз.
+http_code() {
+    local url="$1" tries="${2:-12}" code="" i
+    for i in $(seq 1 "$tries"); do
+        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url" 2>/dev/null || true)"
+        case "$code" in
+            ''|000|502|503|504) sleep 3 ;;
+            *) printf '%s' "$code"; return 0 ;;
+        esac
+    done
+    printf '%s' "${code:-000}"
+}
+
+# WebSocket-апгрейд с повторами
+ws_code() {
+    local url="$1" tries="${2:-12}" code="" i
+    for i in $(seq 1 "$tries"); do
+        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+            -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+            -H 'Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==' -H 'Sec-WebSocket-Version: 13' \
+            "$url" 2>/dev/null || true)"
+        case "$code" in
+            ''|000|502|503|504) sleep 3 ;;
+            *) printf '%s' "$code"; return 0 ;;
+        esac
+    done
+    printf '%s' "${code:-000}"
 }
 
 # ===========================================================================
@@ -903,6 +917,8 @@ main() {
         step "Пробный запуск (ничего не меняем)"
         preflight
         check_ports
+        check_node_ip
+        check_reverse_proxy
         step "Будет сделано"
         echo "  • сгенерированы недостающие секреты в .env"
         echo "  • дамп БД: deploy/backups/$TS/db.dump"
@@ -913,6 +929,7 @@ main() {
     fi
 
     preflight
+    normalize_line_endings
     check_ports
     check_node_ip
     check_reverse_proxy
@@ -925,7 +942,7 @@ main() {
 
     for pair in ${PREV_IMAGES[@]+"${PREV_IMAGES[@]}"}; do
         img="${pair%% *}"
-        docker rmi "studyroom-rollback/$(echo "$img" | tr '/:' '--'):$TS" >/dev/null 2>&1 || true
+        docker rmi "$ROLLBACK_MARKER/$(echo "$img" | tr '/:' '--'):$TS" >/dev/null 2>&1 || true
     done
 
     ls -1dt "$ROOT"/deploy/backups/*/ 2>/dev/null | tail -n +6 | while read -r old; do

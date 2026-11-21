@@ -108,4 +108,37 @@ class LiveKitWebhookController extends Controller
 
         ParticipantPresence::dispatch($room, $action, $identity, $name);
     }
+
+    /**
+     * Эфир считается живым, только если в базе есть активная запись стрима.
+     * Иначе вебхук resurrect-ит уже остановленный эфир.
+     */
+    private function markLive(Room $room): void
+    {
+        $hasActiveStream = $room->streams()
+            ->where('status', Stream::STATUS_LIVE)
+            ->exists();
+
+        if ($hasActiveStream) {
+            $room->forceFill(['is_live' => true])->save();
+        }
+    }
+
+    private function markEnded(Room $room): void
+    {
+        $room->streams()
+            ->where('status', Stream::STATUS_LIVE)
+            ->update(['status' => Stream::STATUS_ENDED, 'ended_at' => now()]);
+
+        $room->forceFill(['is_live' => false])->save();
+
+        try {
+            StreamEnded::dispatch($room);
+        } catch (\Throwable $e) {
+            Log::warning('Не удалось разослать событие об окончании эфира', [
+                'room_id' => $room->getKey(),
+                'reason' => $e->getMessage(),
+            ]);
+        }
+    }
 }
