@@ -22,6 +22,13 @@ return [
 
     'token_ttl' => (int) env('LIVEKIT_TOKEN_TTL', 3600),
 
+    /*
+     | Источники, которые участник может публиковать. canPublishSources
+     | задаёт белый список и заменяет canPublish. Значения — имена элементов
+     | protobuf-enum TrackSource (CAMERA, MICROPHONE, SCREEN_SHARE, ...).
+     */
+    'publish_sources' => ['CAMERA', 'MICROPHONE', 'SCREEN_SHARE', 'SCREEN_SHARE_AUDIO'],
+
     'room_prefix' => env('LIVEKIT_ROOM_PREFIX', 'studyroom-'),
 
     'empty_timeout' => (int) env('LIVEKIT_EMPTY_TIMEOUT', 300),

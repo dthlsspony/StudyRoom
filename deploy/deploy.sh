@@ -657,14 +657,26 @@ update() {
 
     if [ "$SKIP_PULL" -eq 0 ]; then
         step "Обновление базовых образов"
-        compose pull --quiet --ignore-buildable db livekit || warn "pull базовых образов не удался"
+        # Docker Hub ограничивает анонимные запросы (429). Это не повод
+        # останавливать деплой: базовые образы уже есть в локальном кэше.
+        local attempt pulled=0
+        for attempt in 1 2 3; do
+            if compose pull --quiet --ignore-buildable db livekit; then
+                pulled=1
+                break
+            fi
+            warn "pull не удался (обычно лимит Docker Hub), пробуем ещё раз ($attempt/3)"
+            sleep $((attempt * 20))
+        done
+        [ "$pulled" -eq 1 ] && ok "базовые образы обновлены" || warn "базовые образы остались прежними — сборка пойдёт по локальному кэшу"
     fi
 
     step "Сборка образов"
-    if ! compose build --pull app web frontend; then
-        # Реестр недоступен или сеть моргнула — собираем на локальном кэше.
-        warn "сборка с обновлением базовых образов не удалась, пробуем без него"
-        compose build app web frontend || die "сборка образов не удалась"
+    # Без --pull: BuildKit берёт базовые образы из локального кэша и не ходит
+    # в реестр — иначе лимит Docker Hub (429) роняет всю сборку.
+    if ! compose build app web frontend; then
+        warn "сборка на локальном кэше не удалась, пробуем с обновлением базовых образов"
+        compose build --pull app web frontend || die "сборка образов не удалась"
     fi
     ok "образы собраны"
 

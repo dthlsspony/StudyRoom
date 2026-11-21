@@ -4,27 +4,95 @@ import type { Participant } from 'livekit-client'
 import { api, ApiError } from '../lib/api'
 import { getMediaDiagnostics, mediaProblemMessage } from '../lib/media'
 
+export interface StageParticipant {
+  identity: string
+  name: string
+  isLocal: boolean
+  isHost: boolean
+  micMuted: boolean
+  cameraMuted: boolean
+  sharingScreen: boolean
+}
+
 interface VideoStageProps {
   roomId: number
   isLive: boolean
   canPublish: boolean
+  /** identity ведущего (id владельца комнаты) */
+  hostIdentity: string
   onStreamUnavailable?: () => void
+  onParticipantsChange?: (participants: StageParticipant[]) => void
 }
 
 interface Tile {
   identity: string
   name: string
   isLocal: boolean
+  isHost: boolean
   participant: Participant
+  micMuted: boolean
+  cameraMuted: boolean
+  sharingScreen: boolean
+}
+
+type TileFilter = 'camera' | 'screen'
+
+/**
+ * Состояния публикации участника: заглушён ли микрофон, камера и демонстрирует ли экран.
+ */
+function publishStates(participant: Participant) {
+  let micMuted = true
+  let cameraMuted = true
+  let sharingScreen = false
+
+  participant.trackPublications.forEach((publication) => {
+    const track = publication.track
+    if (!track) {
+      return
+    }
+    const muted = publication.isMuted || track.isMuted
+
+    if (track.kind === Track.Kind.Audio) {
+      micMuted = muted
+    } else if (track.kind === Track.Kind.Video) {
+      if (String(track.source) === 'screen_share') {
+        sharingScreen = !muted
+      } else {
+        cameraMuted = muted
+      }
+    }
+  })
+
+  return { micMuted, cameraMuted, sharingScreen }
+}
+
+/**
+ * Метаданные участника приходят строкой JSON: {"muted": true} — метка,
+ * поставленная ведущим.
+ */
+function parseMetadata(metadata?: string | null): { muted?: boolean } {
+  if (!metadata) {
+    return {}
+  }
+  try {
+    const parsed = JSON.parse(metadata)
+    return typeof parsed === 'object' && parsed !== null ? parsed : {}
+  } catch {
+    return {}
+  }
 }
 
 function VideoTile({
   participant,
   isLocal,
+  isHost,
+  filter,
   tick,
 }: {
   participant: Participant
   isLocal: boolean
+  isHost: boolean
+  filter: TileFilter
   tick: number
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -42,8 +110,15 @@ function VideoTile({
       if (!track) {
         return
       }
+
+      // Экран приходит отдельным видеотреком с источником screen_share.
+      const isScreen = String(track.source) === 'screen_share'
+      if ((filter === 'screen') !== isScreen) {
+        return
+      }
+
       const element = track.attach()
-      element.classList.add(track.kind === Track.Kind.Video ? 'lk-video' : 'lk-audio')
+      element.classList.add(isScreen ? 'lk-screen' : 'lk-video')
 
       // Собственный микрофон не должен звучать в собственных наушниках:
       // LiveKit не отправляет его собеседникам, но локально трек проигрывается.
@@ -61,16 +136,17 @@ function VideoTile({
         element.remove()
       })
     }
-  }, [participant, tick, isLocal])
+  }, [participant, tick, filter, isLocal])
 
   const name = participant.name || participant.identity
 
   return (
-    <div className="video-tile">
+    <div className={isHost ? 'video-tile video-tile-host' : 'video-tile'}>
       <div className="video-track" ref={containerRef} />
       <span className="video-label">
         {name}
         {isLocal ? ' (вы)' : ''}
+        {isHost ? ' · ведущий' : ''}
       </span>
     </div>
   )
@@ -80,41 +156,74 @@ export default function VideoStage({
   roomId,
   isLive,
   canPublish,
+  hostIdentity,
   onStreamUnavailable,
+  onParticipantsChange,
 }: VideoStageProps) {
   const roomRef = useRef<Room | null>(null)
   const [tiles, setTiles] = useState<Tile[]>([])
+  const [screenTile, setScreenTile] = useState<Tile | null>(null)
   const [status, setStatus] = useState<'idle' | 'connecting' | 'connected' | 'error'>('idle')
   const [error, setError] = useState<string | null>(null)
   const [mediaWarning, setMediaWarning] = useState<string | null>(null)
   const [mediaHint, setMediaHint] = useState<string | null>(null)
   const [micEnabled, setMicEnabled] = useState(false)
   const [cameraEnabled, setCameraEnabled] = useState(false)
+  const [screenSharing, setScreenSharing] = useState(false)
+  const [mutedByHost, setMutedByHost] = useState(false)
   const [tick, setTick] = useState(0)
+
+  // Колбэки и флаги держим в refs: иначе родитель создаёт новые функции при
+  // каждом рендере, connect() меняется вместе с ними, и эффект подключения
+  // зацикливается.
+  const isLiveRef = useRef(isLive)
+  const streamUnavailableRef = useRef(onStreamUnavailable)
+  const participantsChangeRef = useRef(onParticipantsChange)
+
+  useEffect(() => {
+    isLiveRef.current = isLive
+    streamUnavailableRef.current = onStreamUnavailable
+    participantsChangeRef.current = onParticipantsChange
+  }, [isLive, onStreamUnavailable, onParticipantsChange])
 
   const syncTiles = useCallback((room: Room) => {
     const list: Tile[] = []
+    let screen: Tile | null = null
 
-    room.remoteParticipants.forEach((participant) => {
-      list.push({
+    const push = (participant: Participant, local: boolean) => {
+      const states = publishStates(participant)
+      const tile: Tile = {
         identity: participant.identity,
-        name: participant.name ?? participant.identity,
-        isLocal: false,
+        name: participant.name || participant.identity,
+        isLocal: local,
+        isHost: participant.identity === hostIdentity,
         participant,
-      })
-    })
+        ...states,
+      }
+      if (states.sharingScreen) {
+        screen = tile
+      }
+      list.push(tile)
+    }
 
-    const local = room.localParticipant
-    list.push({
-      identity: local.identity,
-      name: local.name ?? local.identity,
-      isLocal: true,
-      participant: local,
-    })
+    room.remoteParticipants.forEach((participant) => push(participant, false))
+    push(room.localParticipant, true)
 
     setTiles(list)
+    setScreenTile(screen)
     setTick((value) => value + 1)
-  }, [])
+
+    const report: StageParticipant[] = list.map((tile) => ({
+      identity: tile.identity,
+      name: tile.name,
+      isLocal: tile.isLocal,
+      isHost: tile.isHost,
+      micMuted: tile.micMuted,
+      cameraMuted: tile.cameraMuted,
+      sharingScreen: tile.sharingScreen,
+    }))
+    participantsChangeRef.current?.(report)
+  }, [hostIdentity])
 
   const disconnect = useCallback(() => {
     const room = roomRef.current
@@ -124,10 +233,14 @@ export default function VideoStage({
       roomRef.current = null
     }
     setTiles([])
+    setScreenTile(null)
     setStatus('idle')
     setMicEnabled(false)
     setCameraEnabled(false)
+    setScreenSharing(false)
+    setMutedByHost(false)
     setMediaWarning(null)
+    participantsChangeRef.current?.([])
   }, [])
 
   const connect = useCallback(async () => {
@@ -139,9 +252,8 @@ export default function VideoStage({
       const access = await api.stream.access(roomId)
 
       if (!access.is_live || !access.token) {
-        // Эфир в базе помечен живым, но в LiveKit его уже нет — просим обновить комнату.
-        if (isLive) {
-          onStreamUnavailable?.()
+        if (isLiveRef.current) {
+          streamUnavailableRef.current?.()
         }
         setStatus('idle')
         return
@@ -157,23 +269,41 @@ export default function VideoStage({
       room.on(RoomEvent.TrackMuted, () => syncTiles(room))
       room.on(RoomEvent.TrackUnmuted, () => syncTiles(room))
       room.on(RoomEvent.LocalTrackPublished, () => syncTiles(room))
+      room.on(RoomEvent.LocalTrackUnpublished, () => syncTiles(room))
+
+      // Ведущий может заглушить участника: сервер ставит запрет на публикацию,
+      // а в metadata приходит метка — клиент сам выключает микрофон.
+      room.on(RoomEvent.ParticipantMetadataChanged, (_previousMetadata, participant) => {
+        const muted = parseMetadata(participant?.metadata).muted === true
+
+        if (participant && participant.identity === room.localParticipant.identity) {
+          setMutedByHost(muted)
+          if (muted) {
+            void room.localParticipant.setMicrophoneEnabled(false).then(() => {
+              setMicEnabled(false)
+              syncTiles(room)
+            })
+          }
+        }
+        syncTiles(room)
+      })
+
       room.on(RoomEvent.Disconnected, () => {
         setStatus('idle')
         setTiles([])
       })
 
       await room.connect(access.ws_url, access.token, { autoSubscribe: true })
+      setError(null)
       syncTiles(room)
       setStatus('connected')
 
       if (canPublish) {
-        // Отказ доступа к устройствам не должен выглядеть как отказ подключения.
         try {
           await room.localParticipant.setMicrophoneEnabled(true)
           await room.localParticipant.setCameraEnabled(true)
           setMicEnabled(true)
           setCameraEnabled(true)
-          setMediaWarning(null)
         } catch {
           const diagnostics = await getMediaDiagnostics()
           setMediaWarning(
@@ -185,14 +315,10 @@ export default function VideoStage({
     } catch (e) {
       setStatus('error')
       setError(
-        e instanceof ApiError
-          ? e.message
-          : e instanceof Error
-            ? e.message
-            : 'Не удалось подключиться к эфиру',
+        e instanceof ApiError ? e.message : e instanceof Error ? e.message : 'Не удалось подключиться к эфиру',
       )
     }
-  }, [roomId, canPublish, isLive, onStreamUnavailable, syncTiles])
+  }, [roomId, canPublish, syncTiles])
 
   useEffect(() => {
     if (isLive) {
@@ -213,15 +339,9 @@ export default function VideoStage({
     let cancelled = false
 
     getMediaDiagnostics().then((diagnostics) => {
-      if (cancelled) {
+      if (cancelled || cameraEnabled) {
         return
       }
-
-      if (cameraEnabled) {
-        setMediaHint(null)
-        return
-      }
-
       setMediaHint(
         diagnostics.permission === 'prompt'
           ? 'Браузер ещё не спрашивал разрешение на камеру — нажмите «Включить камеру», чтобы появился запрос.'
@@ -244,6 +364,7 @@ export default function VideoStage({
       await room.localParticipant.setMicrophoneEnabled(next)
       setMicEnabled(next)
       setMediaWarning(null)
+      syncTiles(room)
     } catch {
       const diagnostics = await getMediaDiagnostics()
       setMediaWarning(
@@ -263,6 +384,7 @@ export default function VideoStage({
       await room.localParticipant.setCameraEnabled(next)
       setCameraEnabled(next)
       setMediaWarning(null)
+      syncTiles(room)
     } catch {
       const diagnostics = await getMediaDiagnostics()
       setMediaWarning(
@@ -272,6 +394,30 @@ export default function VideoStage({
     }
   }
 
+  async function toggleScreenShare() {
+    const room = roomRef.current
+    if (!room) {
+      return
+    }
+    try {
+      const next = !screenSharing
+      await room.localParticipant.setScreenShareEnabled(next)
+      setScreenSharing(next)
+      setMediaWarning(null)
+      syncTiles(room)
+    } catch (e) {
+      setMediaWarning(
+        e instanceof Error
+          ? `Не удалось запустить демонстрацию экрана: ${e.message}`
+          : 'Не удалось запустить демонстрацию экрана',
+      )
+    }
+  }
+
+  // Плитка ведущего показывается отдельно, чтобы окна участников не стояли рядом с ней.
+  const hostTile = tiles.find((tile) => tile.isHost) ?? null
+  const otherTiles = tiles.filter((tile) => !tile.isHost)
+
   return (
     <div className="video-stage">
       <div className="panel-head">
@@ -279,12 +425,26 @@ export default function VideoStage({
         <div className="stage-actions">
           {status === 'connected' && (
             <>
+              {canPublish && (
+                <button
+                  type="button"
+                  className={screenSharing ? 'ghost active' : 'ghost'}
+                  onClick={() => void toggleScreenShare()}
+                >
+                  {screenSharing ? 'Остановить показ экрана' : 'Показать экран'}
+                </button>
+              )}
               <button
                 type="button"
                 className={micEnabled ? 'ghost' : 'ghost danger'}
                 onClick={() => void toggleMic()}
+                disabled={mutedByHost}
               >
-                {micEnabled ? 'Выключить микрофон' : 'Включить микрофон'}
+                {mutedByHost
+                  ? 'Вас заглушил ведущий'
+                  : micEnabled
+                    ? 'Выключить микрофон'
+                    : 'Включить микрофон'}
               </button>
               <button
                 type="button"
@@ -313,16 +473,44 @@ export default function VideoStage({
         <p className="muted">Эфир не запущен. Владелец комнаты может его начать.</p>
       )}
 
-      <div className="video-grid">
-        {tiles.map((tile) => (
+      {screenTile && (
+        <div className="screen-share">
           <VideoTile
-            key={tile.identity}
-            participant={tile.participant}
-            isLocal={tile.isLocal}
+            participant={screenTile.participant}
+            isLocal={screenTile.isLocal}
+            isHost={screenTile.isHost}
+            filter="screen"
             tick={tick}
           />
-        ))}
-      </div>
+        </div>
+      )}
+
+      {hostTile && (
+        <div className="host-tile">
+          <VideoTile
+            participant={hostTile.participant}
+            isLocal={hostTile.isLocal}
+            isHost
+            filter="camera"
+            tick={tick}
+          />
+        </div>
+      )}
+
+      {otherTiles.length > 0 && (
+        <div className="video-grid">
+          {otherTiles.map((tile) => (
+            <VideoTile
+              key={tile.identity}
+              participant={tile.participant}
+              isLocal={tile.isLocal}
+              isHost={false}
+              filter="camera"
+              tick={tick}
+            />
+          ))}
+        </div>
+      )}
     </div>
   )
 }

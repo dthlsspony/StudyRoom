@@ -41,6 +41,14 @@ class RoomPolicy
         return $user->id === $room->owner_id;
     }
 
+    /**
+     * Модерация: заглушить участника может только ведущий.
+     */
+    public function moderate(User $user, Room $room): bool
+    {
+        return $user->id === $room->owner_id;
+    }
+
     public function join(User $user, Room $room): bool
     {
         return true;

@@ -3,6 +3,7 @@
 use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\LiveKitWebhookController;
 use App\Http\Controllers\Api\V1\MessageController;
+use App\Http\Controllers\Api\V1\ParticipantController;
 use App\Http\Controllers\Api\V1\RoomController;
 use App\Http\Controllers\Api\V1\StreamController;
 use Illuminate\Support\Facades\Route;
@@ -26,6 +27,10 @@ Route::prefix('v1')->group(function (): void {
         Route::delete('rooms/{room}', [RoomController::class, 'destroy']);
         Route::post('rooms/{room}/join', [RoomController::class, 'join']);
         Route::post('rooms/{room}/leave', [RoomController::class, 'leave']);
+
+        Route::get('rooms/{room}/participants', [ParticipantController::class, 'index']);
+        Route::post('rooms/{room}/participants/{identity}/mute', [ParticipantController::class, 'mute']);
+        Route::post('rooms/{room}/participants/{identity}/unmute', [ParticipantController::class, 'unmute']);
 
         Route::get('rooms/{room}/messages', [MessageController::class, 'index']);
         Route::post('rooms/{room}/messages', [MessageController::class, 'store']);

@@ -34,6 +34,17 @@ export interface StreamAccess {
   is_live: boolean
 }
 
+export interface Participant {
+  identity: string
+  name: string
+  is_host: boolean
+  mic_muted: boolean
+  camera_muted: boolean
+  sharing_screen: boolean
+  muted_by_host: boolean
+  connected: boolean
+}
+
 export interface Paginated<T> {
   data: T[]
   meta: {
@@ -203,6 +214,22 @@ export const api = {
     },
     async stop(roomId: number): Promise<void> {
       await request<void>(`/api/v1/rooms/${roomId}/stream`, { method: 'DELETE' })
+    },
+  },
+  participants: {
+    async list(roomId: number): Promise<Participant[]> {
+      const result = await request<{ data: Participant[] }>(`/api/v1/rooms/${roomId}/participants`)
+      return result.data
+    },
+    async mute(roomId: number, identity: string): Promise<void> {
+      await request<void>(`/api/v1/rooms/${roomId}/participants/${encodeURIComponent(identity)}/mute`, {
+        method: 'POST',
+      })
+    },
+    async unmute(roomId: number, identity: string): Promise<void> {
+      await request<void>(`/api/v1/rooms/${roomId}/participants/${encodeURIComponent(identity)}/unmute`, {
+        method: 'POST',
+      })
     },
   },
 }

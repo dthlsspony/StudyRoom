@@ -63,6 +63,7 @@ class LiveKitService
             'canPublish' => true,
             'canSubscribe' => true,
             'canPublishData' => true,
+            'canPublishSources' => (array) config('livekit.publish_sources'),
         ], $grants);
 
         return $this->encode([
@@ -191,6 +192,26 @@ class LiveKitService
         ]);
 
         return $response['participants'] ?? [];
+    }
+
+    /**
+     * Обновить участника: metadata и права публикации.
+     *
+     * canPublish = false — серверное ограничение: заглушённый участник не сможет
+     * публиковать звук или видео, даже если попытается включить микрофон сам.
+     *
+     * @param  array<string, mixed>  $options  metadata, permission, name
+     * @return array<string, mixed>
+     */
+    public function updateParticipant(string $roomName, string $identity, array $options = []): array
+    {
+        return $this->call('UpdateParticipant', [
+            'room' => $roomName,
+            'identity' => $identity,
+        ] + $options, [
+            'room' => $roomName,
+            'roomAdmin' => true,
+        ]);
     }
 
     /**

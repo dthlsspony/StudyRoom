@@ -6,11 +6,14 @@ import { getEcho } from '../lib/echo'
 import { useAuth } from '../context/AuthContext'
 import ChatPanel from '../components/ChatPanel'
 import VideoStage from '../components/VideoStage'
+import ParticipantsPanel from '../components/ParticipantsPanel'
+import type { StageParticipant } from '../components/VideoStage'
 
 export default function RoomPage() {
   const { roomId } = useParams()
   const { user } = useAuth()
   const [room, setRoom] = useState<Room | null>(null)
+  const [participants, setParticipants] = useState<StageParticipant[]>([])
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -25,6 +28,11 @@ export default function RoomPage() {
   }, [id])
 
   useEffect(() => {
+    void loadRoom()
+  }, [loadRoom])
+
+  // Стабильный колбэк: иначе VideoStage переподключается по кругу.
+  const handleStreamUnavailable = useCallback(() => {
     void loadRoom()
   }, [loadRoom])
 
@@ -131,13 +139,26 @@ export default function RoomPage() {
             roomId={id}
             isLive={room.is_live}
             canPublish={isOwner}
-            onStreamUnavailable={() => void loadRoom()}
+            hostIdentity={String(room.owner.id)}
+            onStreamUnavailable={handleStreamUnavailable}
+            onParticipantsChange={setParticipants}
           />
         </section>
 
-        <section className="panel">
-          <ChatPanel roomId={id} />
-        </section>
+        <div className="side-column">
+          <section className="panel">
+            <ParticipantsPanel
+              roomId={id}
+              participants={participants}
+              canModerate={isOwner}
+              localIdentity={String(user?.id ?? '')}
+            />
+          </section>
+
+          <section className="panel">
+            <ChatPanel roomId={id} />
+          </section>
+        </div>
       </main>
     </div>
   )

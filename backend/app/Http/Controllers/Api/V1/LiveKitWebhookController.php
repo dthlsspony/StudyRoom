@@ -66,9 +66,9 @@ class LiveKitWebhookController extends Controller
     /**
      * Участник покинул комнату.
      *
-     * Эфир завершается, если ушёл ведущий (тот, кто его запустил) — трансляции
-     * больше нет. Если ведущий остался, но комната опустела — тоже завершаем:
-     * иначе комната «висит» до таймаута пустой комнаты.
+     * Эфир держит ведущий: если ушёл именно он — трансляция закончилась.
+     * Уход остальных участников ничего не меняет: комната ещё не пуста,
+     * а свежий эфир, в который никто не успел войти, закрывать нельзя.
      */
     private function handleParticipantLeft(Room $room, string $identity, ?string $name): void
     {
@@ -84,70 +84,17 @@ class LiveKitWebhookController extends Controller
             return;
         }
 
-        $service = LiveKitService::fromConfig();
-        $roomName = $room->livekitRoomName();
-
-        $isStarter = (string) $stream->started_by === $identity;
-
-        if (! $isStarter) {
-            try {
-                $participants = array_filter(
-                    $service->listParticipants($roomName),
-                    fn (array $participant) => ($participant['identity'] ?? null) !== $identity,
-                );
-            } catch (RuntimeException $e) {
-                // Не смогли проверить состав — не закрываем эфир: LiveKit пришлёт room_finished.
-                Log::warning('Не удалось получить список участников LiveKit', [
-                    'room' => $roomName,
-                    'reason' => $e->getMessage(),
-                ]);
-
-                return;
-            }
-
-            if ($participants !== []) {
-                return;
-            }
+        if ((string) $stream->started_by !== $identity) {
+            return;
         }
 
         $this->markEnded($room);
 
         try {
-            $service->deleteRoom($roomName);
+            LiveKitService::fromConfig()->deleteRoom($room->livekitRoomName());
         } catch (RuntimeException $e) {
             Log::warning('Не удалось удалить комнату LiveKit', [
-                'room' => $roomName,
-                'reason' => $e->getMessage(),
-            ]);
-        }
-    }
-
-    private function markLive(Room $room): void
-    {
-        // Эфир считается живым, только если в базе есть активная запись стрима.
-        // Иначе вебхук resurrect-ит уже остановленный эфир.
-        $hasActiveStream = $room->streams()
-            ->where('status', Stream::STATUS_LIVE)
-            ->exists();
-
-        if ($hasActiveStream) {
-            $room->forceFill(['is_live' => true])->save();
-        }
-    }
-
-    private function markEnded(Room $room): void
-    {
-        $room->streams()
-            ->where('status', Stream::STATUS_LIVE)
-            ->update(['status' => Stream::STATUS_ENDED, 'ended_at' => now()]);
-
-        $room->forceFill(['is_live' => false])->save();
-
-        try {
-            StreamEnded::dispatch($room);
-        } catch (\Throwable $e) {
-            Log::warning('Не удалось разослать событие об окончании эфира', [
-                'room_id' => $room->getKey(),
+                'room' => $room->livekitRoomName(),
                 'reason' => $e->getMessage(),
             ]);
         }
